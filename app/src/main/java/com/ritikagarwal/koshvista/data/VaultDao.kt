@@ -28,6 +28,8 @@ interface VaultDao {
     @Query("SELECT * FROM accounts WHERE ownerId = :ownerId AND id = :id") suspend fun account(ownerId: String, id: String): AccountEntity?
     @Query("SELECT * FROM accounts WHERE ownerId = :ownerId AND status = 'active' ORDER BY createdAtMs")
     fun accounts(ownerId: String): Flow<List<AccountEntity>>
+    @Query("SELECT * FROM accounts WHERE ownerId = :ownerId ORDER BY createdAtMs")
+    fun allAccounts(ownerId: String): Flow<List<AccountEntity>>
     @Query("""
         SELECT a.ownerId, a.id, a.name, a.type, a.currencyCode,
                a.openingBalanceMinor + COALESCE(SUM(t.amountMinor), 0) AS balanceMinor
@@ -38,6 +40,8 @@ interface VaultDao {
         ORDER BY a.createdAtMs
     """)
     fun balances(ownerId: String): Flow<List<AccountBalance>>
+    @Query("SELECT openingBalanceMinor + COALESCE((SELECT SUM(amountMinor) FROM transactions WHERE ownerId = :ownerId AND accountId = :accountId AND status = 'posted'), 0) FROM accounts WHERE ownerId = :ownerId AND id = :accountId")
+    suspend fun accountBalanceOnce(ownerId: String, accountId: String): Long?
 
     @Insert suspend fun insertCategory(category: CategoryEntity)
     @Query("SELECT * FROM categories WHERE ownerId = :ownerId AND isArchived = 0 ORDER BY name")

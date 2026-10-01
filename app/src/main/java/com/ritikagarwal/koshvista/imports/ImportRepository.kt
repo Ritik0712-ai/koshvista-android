@@ -110,6 +110,7 @@ class ImportRepository(
         if (job.status == "completed") return@withTransaction job.acceptedCount
         require(job.status == "review")
         val account = ledgerDao.account(ownerId, job.accountId) ?: error("Account unavailable")
+        require(account.status == "active") { "Account is archived" }
         val rows = dao.candidatesOnce(ownerId, jobId)
         require(rows.none { it.decision == "unreviewed" }) { "Resolve uncertain rows before saving" }
         val now = System.currentTimeMillis()

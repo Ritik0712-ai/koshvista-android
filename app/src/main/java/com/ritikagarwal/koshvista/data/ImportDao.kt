@@ -22,6 +22,8 @@ interface ImportDao {
     suspend fun job(ownerId: String, id: String): ImportJobEntity?
     @Query("SELECT * FROM import_jobs WHERE ownerId = :ownerId ORDER BY createdAtMs DESC")
     fun jobs(ownerId: String): Flow<List<ImportJobEntity>>
+    @Query("SELECT COUNT(*) FROM import_jobs WHERE ownerId = :ownerId AND accountId = :accountId AND status = 'review'")
+    suspend fun pendingJobsForAccount(ownerId: String, accountId: String): Int
 
     @Insert suspend fun insertCandidate(candidate: ImportCandidateEntity)
     @Update suspend fun updateCandidate(candidate: ImportCandidateEntity)

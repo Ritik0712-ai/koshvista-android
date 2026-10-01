@@ -19,6 +19,31 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun accountArchiveRequiresZeroBalanceAndPreservesLedger() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 10, 1)
+                repo.initialiseOwner("Tester")
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(10_000, "INR"), day)
+                val cash = repo.addAccount("cash", "Wallet", "INR", Money(0, "INR"), day)
+                repo.renameAccount(cash, "Petty cash")
+                assertEquals("Petty cash", repo.accounts.first().single { it.id == cash }.name)
+                assertTrue(runCatching { repo.archiveAccount(bank) }.isFailure)
+                repo.transfer(bank, cash, Money(10_000, "INR"), day)
+                repo.archiveAccount(bank)
+                assertEquals("archived", database.vaultDao().account(owner, bank)?.status)
+                assertEquals(1, repo.accounts.first().size)
+                assertEquals(2, database.vaultDao().transferEntries(owner,
+                    repo.recentTransactions.first().first().transferGroupId!!).size)
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun investmentBuyAndSellKeepCostBasisAndCashReconciled() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

@@ -19,6 +19,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
     private val dao = database.vaultDao()
 
     val accounts: Flow<List<AccountEntity>> = dao.accounts(ownerId)
+    val allAccounts: Flow<List<AccountEntity>> = dao.allAccounts(ownerId)
     val balances: Flow<List<AccountBalance>> = dao.balances(ownerId)
     val categories: Flow<List<CategoryEntity>> = dao.categories(ownerId)
     val recentTransactions: Flow<List<TransactionEntity>> = dao.transactions(ownerId, 100, 0)
@@ -97,6 +98,23 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
             amount.minor, amount.currencyCode, kind.name.lowercase(), sourceDocumentId = sourceDocumentId,
             sourceFingerprint = sourceFingerprint, note = note, createdAtMs = now, updatedAtMs = now))
         id
+    }
+
+    suspend fun renameAccount(accountId: String, name: String) = database.withTransaction {
+        require(name.isNotBlank())
+        val account = dao.account(ownerId, accountId) ?: error("Account unavailable")
+        require(account.status == "active")
+        dao.updateAccount(account.copy(name = name.trim(), updatedAtMs = System.currentTimeMillis()))
+    }
+
+    suspend fun archiveAccount(accountId: String) = database.withTransaction {
+        val account = dao.account(ownerId, accountId) ?: error("Account unavailable")
+        require(account.status == "active")
+        require(dao.accountBalanceOnce(ownerId, accountId) == 0L) { "Move the remaining balance before archiving" }
+        require(database.importDao().pendingJobsForAccount(ownerId, accountId) == 0) { "Review or cancel pending imports first" }
+        require(dao.activeDepositCountForAccount(ownerId, accountId) == 0) { "An active fixed deposit uses this account" }
+        require(dao.instrumentCountForAccount(ownerId, accountId) == 0) { "An investment uses this account" }
+        dao.updateAccount(account.copy(status = "archived", updatedAtMs = System.currentTimeMillis()))
     }
 
     suspend fun transfer(fromAccountId: String, toAccountId: String, amount: Money, date: LocalDate, note: String? = null): String = database.withTransaction {

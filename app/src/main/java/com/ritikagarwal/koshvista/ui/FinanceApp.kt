@@ -78,6 +78,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val localBackup = remember(context) { LocalVaultBackup(context) }
     val documentReader = remember(context) { DocumentTextReader(context) }
     val accounts by repository.accounts.collectAsState(emptyList())
+    val allAccounts by repository.allAccounts.collectAsState(emptyList())
     val balances by repository.balances.collectAsState(emptyList())
     val categories by repository.categories.collectAsState(emptyList())
     val importJobs by importRepository.history.collectAsState(emptyList())
@@ -96,7 +97,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var tab by remember { mutableStateOf(Tab.Home) }
     var editor by remember { mutableStateOf<Editor?>(null) }
     var addMenu by remember { mutableStateOf(false) }
-    var selectedAccount by remember { mutableStateOf<AccountBalance?>(null) }
+    var selectedAccountId by remember { mutableStateOf<String?>(null) }
     var selectedTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
     var importAccountId by remember { mutableStateOf("") }
     var selectedImportId by remember { mutableStateOf<String?>(null) }
@@ -175,22 +176,30 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = { NavigationBar { Tab.entries.forEach { destination ->
-            NavigationBarItem(selected = tab == destination, onClick = { tab = destination },
+            NavigationBarItem(selected = tab == destination && selectedAccountId == null,
+                onClick = { selectedAccountId = null; tab = destination },
                 icon = { Text(destination.name.first().toString()) }, label = { Text(destination.name) })
         } } },
-        floatingActionButton = { if (tab == Tab.Home || tab == Tab.Activity)
+        floatingActionButton = { if (selectedAccountId == null && (tab == Tab.Home || tab == Tab.Activity))
             FloatingActionButton(onClick = { addMenu = true }) { Text("Add") } },
     ) { padding ->
-        when (tab) {
+        val detailId = selectedAccountId
+        if (detailId != null) {
+            val account = accounts.find { it.id == detailId }
+            val balance = balances.find { it.id == detailId }
+            if (account != null && balance != null) AccountDetail(account, balance, ownerId, database, repository,
+                onBack = { selectedAccountId = null }, onArchived = { selectedAccountId = null },
+                onMessage = { scope.launch { snackbar.showSnackbar(it) } }, modifier = Modifier.padding(padding))
+        } else when (tab) {
             Tab.Home -> HomeContent(balances, income, expense, dailySpending, categoryTotals, budgets,
                 categories.associate { it.id to it.name },
-                onAccount = { selectedAccount = it }, onAccountAdd = { editor = Editor.Account },
+                onAccount = { selectedAccountId = it.id }, onAccountAdd = { editor = Editor.Account },
                 onCashSpend = { editor = Editor.CashExpense },
                 onBudget = { editor = Editor.Budget },
                 onDay = { activityDay = it; categoryFilterActive = false; activityPage = 0; tab = Tab.Activity },
                 onCategory = { activityCategory = it; activityDay = null; categoryFilterActive = true; activityPage = 0; tab = Tab.Activity },
                 Modifier.padding(padding))
-            Tab.Activity -> ActivityContent(visibleTransactions, accounts, { editor = Editor.Expense },
+            Tab.Activity -> ActivityContent(visibleTransactions, allAccounts, { editor = Editor.Expense },
                 onSelect = { selectedTransaction = it },
                 accountId = activityAccountId, onAccount = { activityAccountId = it; activityPage = 0 },
                 search = activitySearch, onSearch = { activitySearch = it; activityPage = 0 },
@@ -243,17 +252,11 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
         }, enabled = recoveryPassphrase.length >= 12) { Text(if (action == "create") "Choose save location" else "Choose backup file") } },
         dismissButton = { TextButton(onClick = { backupAction = null; recoveryPassphrase = "" }) { Text("Cancel") } }) }
 
-    selectedAccount?.let { account -> AlertDialog(onDismissRequest = { selectedAccount = null },
-        title = { Text(account.name) },
-        text = { Column { Text(formatMoney(account.balanceMinor, account.currencyCode), style = MaterialTheme.typography.headlineMedium)
-            Text("Balance from opening amount and posted entries") } },
-        confirmButton = { TextButton(onClick = { selectedAccount = null }) { Text("Close") } }) }
-
     selectedTransaction?.let { transaction -> AlertDialog(onDismissRequest = { selectedTransaction = null },
         title = { Text(transaction.description) },
         text = { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(formatMoney(transaction.amountMinor, transaction.currencyCode), style = MaterialTheme.typography.headlineMedium)
-            Text("${transaction.localDate} · ${accounts.find { it.id == transaction.accountId }?.name ?: "Account"}")
+            Text("${transaction.localDate} · ${allAccounts.find { it.id == transaction.accountId }?.name ?: "Account"}")
             Text("Type: ${transaction.kind.replace('_', ' ')}")
             if (transaction.sourceDocumentId != null) Text("Imported from a statement; original source is retained.")
             if (transaction.transferGroupId != null) Text("Both sides of this transfer will be reversed together.")
@@ -404,7 +407,8 @@ private fun ActivityContent(transactions: List<TransactionEntity>, accounts: Lis
         item { LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item { FilterChip(accountId == null, onClick = { onAccount(null) }, label = { Text("All accounts") }) }
             items(accounts, key = { "filter-${it.id}" }) { account ->
-                FilterChip(accountId == account.id, onClick = { onAccount(account.id) }, label = { Text(account.name) })
+                FilterChip(accountId == account.id, onClick = { onAccount(account.id) },
+                    label = { Text(if (account.status == "archived") "${account.name} · archived" else account.name) })
             }
         } }
         if (filterLabel != null) item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -431,6 +435,52 @@ private fun ActivityContent(transactions: List<TransactionEntity>, accounts: Lis
             TextButton(onClick = { onPage(page + 1) }, enabled = transactions.size == 50) { Text("Next") }
         } }
     }
+}
+
+@Composable
+private fun AccountDetail(account: AccountEntity, balance: AccountBalance, ownerId: String,
+    database: VaultDatabase, repository: LedgerRepository, onBack: () -> Unit, onArchived: () -> Unit,
+    onMessage: (String) -> Unit, modifier: Modifier) {
+    val scope = rememberCoroutineScope()
+    val entries by remember(database, account.id) {
+        database.vaultDao().accountTransactions(ownerId, account.id, 100)
+    }.collectAsState(emptyList())
+    var renaming by remember(account.id) { mutableStateOf(false) }
+    var confirmingArchive by remember(account.id) { mutableStateOf(false) }
+    var newName by remember(account.id) { mutableStateOf(account.name) }
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { TextButton(onClick = onBack) { Text("Back to Home") } }
+        item { Text(account.name, style = MaterialTheme.typography.headlineMedium) }
+        item { Text(account.type.replace('_', ' '), style = MaterialTheme.typography.bodyMedium) }
+        item { Text(formatMoney(balance.balanceMinor, balance.currencyCode), style = MaterialTheme.typography.headlineLarge) }
+        item { Text("Opening balance ${formatMoney(account.openingBalanceMinor, account.currencyCode)} on ${account.openingLocalDate}") }
+        item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { newName = account.name; renaming = true }) { Text("Rename") }
+            TextButton(onClick = { confirmingArchive = true }) { Text("Archive") }
+        } }
+        item { Text("Recent entries", style = MaterialTheme.typography.titleLarge) }
+        if (entries.isEmpty()) item { Text("No posted entries for this account.") }
+        items(entries, key = { it.id }) { entry -> Card(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween) {
+            Column { Text(entry.description); Text(entry.localDate, style = MaterialTheme.typography.bodySmall) }
+            Text(formatMoney(entry.amountMinor, entry.currencyCode))
+        } } }
+        if (entries.size == 100) item { Text("Showing the latest 100 entries. Use Activity to search older records.") }
+    }
+    if (renaming) AlertDialog(onDismissRequest = { renaming = false }, title = { Text("Rename account") },
+        text = { OutlinedTextField(newName, { newName = it }, label = { Text("Account name") }) },
+        confirmButton = { Button(onClick = { scope.launch {
+            try { repository.renameAccount(account.id, newName); renaming = false; onMessage("Account renamed") }
+            catch (error: Exception) { onMessage(error.message ?: "Could not rename account") }
+        } }, enabled = newName.isNotBlank()) { Text("Save") } },
+        dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } })
+    if (confirmingArchive) AlertDialog(onDismissRequest = { confirmingArchive = false }, title = { Text("Archive account?") },
+        text = { Text("Only a zero-balance account can be archived. Its past transactions remain in the vault.") },
+        confirmButton = { Button(onClick = { scope.launch {
+            try { repository.archiveAccount(account.id); confirmingArchive = false; onArchived(); onMessage("Account archived") }
+            catch (error: Exception) { onMessage(error.message ?: "Could not archive account") }
+        } }) { Text("Archive") } },
+        dismissButton = { TextButton(onClick = { confirmingArchive = false }) { Text("Cancel") } })
 }
 
 @Composable
