@@ -56,6 +56,7 @@ import com.ritikagarwal.koshvista.data.BudgetEntity
 import com.ritikagarwal.koshvista.data.PositionSummary
 import com.ritikagarwal.koshvista.data.VaultDatabase
 import com.ritikagarwal.koshvista.imports.ImportRepository
+import com.ritikagarwal.koshvista.imports.DocumentTextReader
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.time.LocalDate
@@ -74,6 +75,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val repository = remember(ownerId, database) { LedgerRepository(ownerId, database) }
     val importRepository = remember(ownerId, database) { ImportRepository(ownerId, database, context) }
     val localBackup = remember(context) { LocalVaultBackup(context) }
+    val documentReader = remember(context) { DocumentTextReader(context) }
     val accounts by repository.accounts.collectAsState(emptyList())
     val balances by repository.balances.collectAsState(emptyList())
     val categories by repository.categories.collectAsState(emptyList())
@@ -102,6 +104,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var categoryFilterActive by remember { mutableStateOf(false) }
     var backupAction by remember { mutableStateOf<String?>(null) }
     var recoveryPassphrase by remember { mutableStateOf("") }
+    var documentPreview by remember { mutableStateOf<String?>(null) }
     val filteredActivity = remember(repository, activityDay, activityCategory, categoryFilterActive) {
         when {
             activityDay != null -> database.vaultDao().transactionsForDay(ownerId, activityDay!!)
@@ -123,6 +126,19 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 selectedImportId = importRepository.stageCsv(importAccountId, name, bytes)
                 snackbar.showSnackbar("Review the statement before saving")
             } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not analyse the file") }
+        }
+    }
+    val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            try {
+                val mimeType = context.contentResolver.getType(uri).orEmpty()
+                val bytes = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { it.readNBytes(20 * 1024 * 1024 + 1) }
+                        ?: error("Could not open document")
+                }
+                documentPreview = documentReader.read(bytes, mimeType).take(20_000)
+                snackbar.showSnackbar("Text extracted on this phone. Review it before recording anything.")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not read document") }
         }
     }
     val backupPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
@@ -179,6 +195,8 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 Modifier.padding(padding))
             Tab.Import -> ImportContent(accounts, importJobs, importAccountId, selectedImportId, importRepository,
                 onAccount = { importAccountId = it }, onPick = { filePicker.launch(arrayOf("text/*", "application/csv")) },
+                onReadDocument = { documentPicker.launch(arrayOf("application/pdf", "image/*")) },
+                documentPreview = documentPreview, onClearPreview = { documentPreview = null },
                 onSelectJob = { selectedImportId = it }, onCommit = { id -> scope.launch {
                     try { val count = importRepository.commit(id); snackbar.showSnackbar("Saved $count transactions on this phone") }
                     catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save import") }
@@ -400,7 +418,9 @@ private fun ActivityContent(transactions: List<TransactionEntity>, accounts: Lis
 private fun ImportContent(
     accounts: List<AccountEntity>, jobs: List<ImportJobEntity>, accountId: String,
     selectedJobId: String?, repository: ImportRepository,
-    onAccount: (String) -> Unit, onPick: () -> Unit, onSelectJob: (String?) -> Unit,
+    onAccount: (String) -> Unit, onPick: () -> Unit,
+    onReadDocument: () -> Unit, documentPreview: String?, onClearPreview: () -> Unit,
+    onSelectJob: (String?) -> Unit,
     onCommit: (String) -> Unit, modifier: Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -418,6 +438,14 @@ private fun ImportContent(
                 FilterChip(selected = accountId == account.id, onClick = { onAccount(account.id) }, label = { Text(account.name) })
             }
             item { Button(onClick = onPick, enabled = accountId.isNotBlank()) { Text("Choose CSV statement") } }
+            item { Button(onClick = onReadDocument) { Text("Read PDF or image on device") } }
+            if (documentPreview != null) item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Extracted text preview", style = MaterialTheme.typography.titleMedium)
+                Text("This is unverified text. It has not been added to your accounts.", style = MaterialTheme.typography.bodySmall)
+                Text(documentPreview.ifBlank { "No readable text detected." }, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onClearPreview) { Text("Clear preview") }
+            } } }
             item { Text("Import history", style = MaterialTheme.typography.titleLarge) }
             if (jobs.isEmpty()) item { Text("No statements imported yet.") }
             items(jobs, key = { it.id }) { job -> Card(Modifier.fillMaxWidth().clickable { onSelectJob(job.id) }) {

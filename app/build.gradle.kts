@@ -57,6 +57,7 @@ dependencies {
     implementation("net.zetetic:sqlcipher-android:4.19.1")
     ksp("androidx.room:room-compiler:2.8.5")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
