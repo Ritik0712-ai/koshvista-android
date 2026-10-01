@@ -44,8 +44,10 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         require(openingBalance.currencyCode == currencyCode)
         val id = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
+        val openingMinor = if (type == "liability" || type == "credit_card") -kotlin.math.abs(openingBalance.minor)
+            else openingBalance.minor
         dao.insertAccount(AccountEntity(ownerId, id, type, name.trim(), institutionName?.trim(), currencyCode,
-            openingBalance.minor, openingDate.toString(), isDefaultCash = isDefaultCash, createdAtMs = now, updatedAtMs = now))
+            openingMinor, openingDate.toString(), isDefaultCash = isDefaultCash, createdAtMs = now, updatedAtMs = now))
         id
     }
 

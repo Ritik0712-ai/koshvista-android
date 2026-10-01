@@ -33,11 +33,10 @@ class VaultKeys(context: Context) {
             return cipher.doFinal(packed.copyOfRange(12, packed.size))
         }
         val vaultKey = ByteArray(32).also(random::nextBytes)
-        val nonce = ByteArray(12).also(random::nextBytes)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, nonce))
+        cipher.init(Cipher.ENCRYPT_MODE, key)
         cipher.updateAAD(ownerId.toByteArray(Charsets.UTF_8))
-        val wrapped = nonce + cipher.doFinal(vaultKey)
+        val wrapped = cipher.iv + cipher.doFinal(vaultKey)
         check(prefs.edit().putString(handle, Base64.encodeToString(wrapped, Base64.NO_WRAP)).commit())
         return vaultKey
     }
