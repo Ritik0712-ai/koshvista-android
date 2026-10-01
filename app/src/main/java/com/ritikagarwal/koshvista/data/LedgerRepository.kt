@@ -18,6 +18,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
     val categories: Flow<List<CategoryEntity>> = dao.categories(ownerId)
     val recentTransactions: Flow<List<TransactionEntity>> = dao.transactions(ownerId, 100, 0)
     val fixedDeposits: Flow<List<FixedDepositEntity>> = dao.fixedDeposits(ownerId)
+    val budgets: Flow<List<BudgetEntity>> = dao.budgets(ownerId)
 
     suspend fun initialiseOwner(displayName: String?) = database.withTransaction {
         if (dao.owner(ownerId) == null) {
@@ -157,5 +158,16 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         }
         val now = System.currentTimeMillis()
         entries.forEach { dao.updateTransaction(it.copy(status = "void", updatedAtMs = now)) }
+    }
+
+    suspend fun setMonthlyBudget(categoryId: String, limit: Money) = database.withTransaction {
+        require(limit.minor > 0 && limit.currencyCode == "INR")
+        val category = dao.category(ownerId, categoryId) ?: error("Category unavailable")
+        require(category.kind == "expense" && !category.isArchived)
+        val now = System.currentTimeMillis()
+        val existing = dao.budgetForCategory(ownerId, categoryId)
+        if (existing == null) dao.insertBudget(BudgetEntity(ownerId, UUID.randomUUID().toString(),
+            categoryId, limit.minor, limit.currencyCode, createdAtMs = now, updatedAtMs = now))
+        else dao.updateBudget(existing.copy(limitMinor = limit.minor, status = "active", updatedAtMs = now))
     }
 }

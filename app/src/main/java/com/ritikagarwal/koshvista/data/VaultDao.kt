@@ -98,4 +98,13 @@ interface VaultDao {
     fun fixedDeposits(ownerId: String): Flow<List<FixedDepositEntity>>
     @Query("SELECT COUNT(*) FROM fixed_deposits WHERE ownerId = :ownerId AND assetAccountId = :accountId AND status = 'active'")
     suspend fun activeDepositCountForAccount(ownerId: String, accountId: String): Int
+
+    @Insert suspend fun insertBudget(budget: BudgetEntity)
+    @Update suspend fun updateBudget(budget: BudgetEntity)
+    @Query("SELECT * FROM budgets WHERE ownerId = :ownerId AND categoryId = :categoryId")
+    suspend fun budgetForCategory(ownerId: String, categoryId: String): BudgetEntity?
+    @Query("SELECT * FROM budgets WHERE ownerId = :ownerId AND status = 'active' ORDER BY createdAtMs")
+    fun budgets(ownerId: String): Flow<List<BudgetEntity>>
+    @Query("SELECT * FROM categories WHERE ownerId = :ownerId AND id = :id")
+    suspend fun category(ownerId: String, id: String): CategoryEntity?
 }

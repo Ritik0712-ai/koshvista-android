@@ -18,6 +18,31 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun monthlyBudgetUsesExpenseOnlyAndCanBeUpdated() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 10, 1)
+                repo.initialiseOwner("Tester")
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(100_000, "INR"), day)
+                val cash = repo.addAccount("cash", "Cash", "INR", Money(0, "INR"), day)
+                val food = repo.categories.first().first { it.name == "Food" }.id
+                repo.setMonthlyBudget(food, Money(5_000, "INR"))
+                repo.addTransaction(bank, EntryKind.EXPENSE, Money(-2_000, "INR"), day, "Lunch", food)
+                repo.transfer(bank, cash, Money(1_000, "INR"), day)
+                assertEquals(2_000L, database.vaultDao().categorySpending(owner, day.toString(), day.toString()).first()
+                    .single { it.categoryId == food }.totalMinor)
+                repo.setMonthlyBudget(food, Money(6_000, "INR"))
+                assertEquals(1, repo.budgets.first().size)
+                assertEquals(6_000L, repo.budgets.first().single().limitMinor)
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun reversingTransferVoidsBothSidesAndProtectsDeposits() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

@@ -17,6 +17,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -49,6 +50,7 @@ import com.ritikagarwal.koshvista.data.ImportJobEntity
 import com.ritikagarwal.koshvista.data.ImportCandidateEntity
 import com.ritikagarwal.koshvista.data.TransactionEntity
 import com.ritikagarwal.koshvista.data.FixedDepositEntity
+import com.ritikagarwal.koshvista.data.BudgetEntity
 import com.ritikagarwal.koshvista.data.VaultDatabase
 import com.ritikagarwal.koshvista.imports.ImportRepository
 import java.math.BigDecimal
@@ -61,7 +63,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class Tab { Home, Activity, Import, Wealth, Settings }
-private enum class Editor { Account, Expense, Income, CashExpense, Transfer, FixedDeposit }
+private enum class Editor { Account, Expense, Income, CashExpense, Transfer, FixedDeposit, Budget }
 
 @Composable
 fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) {
@@ -73,6 +75,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val categories by repository.categories.collectAsState(emptyList())
     val importJobs by importRepository.history.collectAsState(emptyList())
     val fixedDeposits by repository.fixedDeposits.collectAsState(emptyList())
+    val budgets by repository.budgets.collectAsState(emptyList())
     val monthStart = remember { LocalDate.now().withDayOfMonth(1).toString() }
     val today = remember { LocalDate.now().toString() }
     val lastSevenStart = remember { LocalDate.now().minusDays(6).toString() }
@@ -128,10 +131,11 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             FloatingActionButton(onClick = { addMenu = true }) { Text("Add") } },
     ) { padding ->
         when (tab) {
-            Tab.Home -> HomeContent(balances, income, expense, dailySpending, categoryTotals,
+            Tab.Home -> HomeContent(balances, income, expense, dailySpending, categoryTotals, budgets,
                 categories.associate { it.id to it.name },
                 onAccount = { selectedAccount = it }, onAccountAdd = { editor = Editor.Account },
                 onCashSpend = { editor = Editor.CashExpense },
+                onBudget = { editor = Editor.Budget },
                 onDay = { activityDay = it; categoryFilterActive = false; tab = Tab.Activity },
                 onCategory = { activityCategory = it; activityDay = null; categoryFilterActive = true; tab = Tab.Activity },
                 Modifier.padding(padding))
@@ -160,6 +164,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             Editor.Expense to "Expense", Editor.Income to "Income", Editor.Transfer to "Transfer",
             Editor.CashExpense to "Cash expense", Editor.Account to "Account",
             Editor.FixedDeposit to "Fixed deposit",
+            Editor.Budget to "Monthly budget",
         ).forEach { (choice, label) -> TextButton(onClick = { editor = choice; addMenu = false }) { Text(label) } } } },
         confirmButton = { TextButton(onClick = { addMenu = false }) { Text("Close") } })
 
@@ -185,6 +190,13 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
         dismissButton = { TextButton(onClick = { selectedTransaction = null }) { Text("Close") } }) }
 
     editor?.let { current -> when (current) {
+        Editor.Budget -> BudgetEditor(categories.filter { it.kind == "expense" && !it.isArchived },
+            { editor = null }) { categoryId, amount -> scope.launch {
+            try {
+                repository.setMonthlyBudget(categoryId, Money.parse(amount, "INR"))
+                editor = null; snackbar.showSnackbar("Monthly budget saved")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save budget") }
+        } }
         Editor.FixedDeposit -> FixedDepositEditor(accounts, { editor = null }) { source, name, institution, principal, rate, maturity -> scope.launch {
             try {
                 repository.createFixedDeposit(source, name, institution, Money.parse(principal, "INR"),
@@ -222,8 +234,10 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
 private fun HomeContent(
     balances: List<AccountBalance>, income: Long, expense: Long,
     dailySpending: List<com.ritikagarwal.koshvista.data.DailySpend>,
-    categoryTotals: List<com.ritikagarwal.koshvista.data.CategoryTotal>, categoryNames: Map<String, String>,
+    categoryTotals: List<com.ritikagarwal.koshvista.data.CategoryTotal>, budgets: List<BudgetEntity>,
+    categoryNames: Map<String, String>,
     onAccount: (AccountBalance) -> Unit, onAccountAdd: () -> Unit, onCashSpend: () -> Unit,
+    onBudget: () -> Unit,
     onDay: (String) -> Unit, onCategory: (String?) -> Unit,
     modifier: Modifier,
 ) {
@@ -238,6 +252,24 @@ private fun HomeContent(
         } } }
         item { DailySpendingCard(dailySpending, onDay) }
         item { CategorySpendingCard(categoryTotals, categoryNames, onCategory) }
+        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Monthly budgets", style = MaterialTheme.typography.titleLarge)
+            TextButton(onClick = onBudget) { Text("Set limit") }
+        } }
+        if (budgets.isEmpty()) item { Text("Set a category limit to see how this month's spending compares.") }
+        items(budgets, key = { it.id }) { budget ->
+            val spent = categoryTotals.find { it.categoryId == budget.categoryId }?.totalMinor ?: 0L
+            val proportion = (spent.toDouble() / budget.limitMinor).toFloat().coerceIn(0f, 1f)
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(categoryNames[budget.categoryId] ?: "Category")
+                    Text("${formatMoney(spent, budget.currencyCode)} / ${formatMoney(budget.limitMinor, budget.currencyCode)}")
+                }
+                LinearProgressIndicator(progress = { proportion }, modifier = Modifier.fillMaxWidth())
+                if (spent > budget.limitMinor) Text("Over limit by ${formatMoney(spent - budget.limitMinor, budget.currencyCode)}",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
         item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(20.dp)) {
             Text("This month's cash flow", style = MaterialTheme.typography.titleMedium)
             Text("Income ${formatMoney(income, "INR")}")
@@ -257,6 +289,23 @@ private fun HomeContent(
         } }
         if (balances.any { it.type == "cash" }) item { Button(onClick = onCashSpend) { Text("Cash expense") } }
     }
+}
+
+@Composable
+private fun BudgetEditor(categories: List<com.ritikagarwal.koshvista.data.CategoryEntity>,
+    onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+    var categoryId by remember { mutableStateOf(categories.firstOrNull()?.id.orEmpty()) }
+    var amount by remember { mutableStateOf("") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Monthly budget") },
+        text = { LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            item { Text("Choose an expense category. Your limit repeats each calendar month.") }
+            items(categories, key = { it.id }) { category ->
+                FilterChip(categoryId == category.id, onClick = { categoryId = category.id }, label = { Text(category.name) })
+            }
+            item { OutlinedTextField(amount, { amount = it }, label = { Text("Monthly limit in INR") }) }
+        } },
+        confirmButton = { Button(onClick = { onSave(categoryId, amount) }, enabled = categoryId.isNotBlank() && amount.isNotBlank()) { Text("Save limit") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable
