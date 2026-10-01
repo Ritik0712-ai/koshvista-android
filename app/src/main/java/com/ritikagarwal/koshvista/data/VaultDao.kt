@@ -62,7 +62,7 @@ interface VaultDao {
     @Query("""
         SELECT DISTINCT t.* FROM transactions t
         LEFT JOIN transaction_splits s ON s.ownerId = t.ownerId AND s.transactionId = t.id
-        WHERE t.ownerId = :ownerId AND t.status = 'posted' AND t.kind = 'expense'
+        WHERE t.ownerId = :ownerId AND t.status = 'posted' AND t.kind IN ('expense', 'refund')
           AND t.localDate BETWEEN :from AND :through
           AND ((:categoryId IS NULL AND COALESCE(s.categoryId, t.categoryId) IS NULL)
                OR COALESCE(s.categoryId, t.categoryId) = :categoryId)
@@ -75,7 +75,7 @@ interface VaultDao {
         WHERE t.ownerId = :ownerId AND t.status = 'posted'
           AND (:accountId IS NULL OR t.accountId = :accountId)
           AND (:day IS NULL OR t.localDate = :day)
-          AND (:categoryFilter = 0 OR (t.kind = 'expense' AND t.localDate BETWEEN :from AND :through
+          AND (:categoryFilter = 0 OR (t.kind IN ('expense', 'refund') AND t.localDate BETWEEN :from AND :through
             AND ((:categoryId IS NULL AND COALESCE(s.categoryId, t.categoryId) IS NULL)
               OR COALESCE(s.categoryId, t.categoryId) = :categoryId)))
           AND (:search IS NULL OR instr(lower(t.description), lower(:search)) > 0)
@@ -88,14 +88,18 @@ interface VaultDao {
     suspend fun transferEntries(ownerId: String, groupId: String): List<TransactionEntity>
     @Query("SELECT COUNT(*) FROM transactions WHERE ownerId = :ownerId AND accountId = :accountId AND sourceFingerprint = :fingerprint AND status = 'posted'")
     suspend fun fingerprintCount(ownerId: String, accountId: String, fingerprint: String): Int
+    @Query("SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE ownerId = :ownerId AND refundOfTransactionId = :originalId AND kind = 'refund' AND status = 'posted'")
+    suspend fun refundedMinor(ownerId: String, originalId: String): Long
     @Query("SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE ownerId = :ownerId AND kind = :kind AND status = 'posted' AND localDate BETWEEN :from AND :through")
     fun totalForKind(ownerId: String, kind: String, from: String, through: String): Flow<Long>
+    @Query("SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE ownerId = :ownerId AND kind IN ('expense', 'refund') AND status = 'posted' AND localDate BETWEEN :from AND :through")
+    fun netExpenseTotal(ownerId: String, from: String, through: String): Flow<Long>
     @Query("""
         SELECT COALESCE(s.categoryId, t.categoryId) AS categoryId,
                -SUM(COALESCE(s.amountMinor, t.amountMinor)) AS totalMinor
         FROM transactions t LEFT JOIN transaction_splits s
           ON s.ownerId = t.ownerId AND s.transactionId = t.id
-        WHERE t.ownerId = :ownerId AND t.kind = 'expense' AND t.status = 'posted'
+        WHERE t.ownerId = :ownerId AND t.kind IN ('expense', 'refund') AND t.status = 'posted'
           AND t.localDate BETWEEN :from AND :through
         GROUP BY COALESCE(s.categoryId, t.categoryId)
         ORDER BY totalMinor DESC
@@ -104,7 +108,7 @@ interface VaultDao {
     @Query("""
         SELECT localDate, -SUM(amountMinor) AS totalMinor
         FROM transactions
-        WHERE ownerId = :ownerId AND kind = 'expense' AND status = 'posted'
+        WHERE ownerId = :ownerId AND kind IN ('expense', 'refund') AND status = 'posted'
           AND localDate BETWEEN :from AND :through
         GROUP BY localDate ORDER BY localDate
     """)

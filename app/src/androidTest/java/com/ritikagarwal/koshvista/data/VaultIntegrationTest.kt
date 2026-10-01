@@ -20,6 +20,38 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun partialRefundReversesSplitCategoriesWithoutInflatingIncome() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 10, 1)
+                repo.initialiseOwner("Tester")
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(10_000, "INR"), day)
+                val categories = repo.categories.first()
+                val food = categories.first { it.name == "Food" }.id
+                val shopping = categories.first { it.name == "Shopping" }.id
+                val expense = repo.addTransaction(bank, EntryKind.EXPENSE, Money(-2_000, "INR"), day, "Market")
+                repo.split(expense, listOf(food to Money(-1_200, "INR"), shopping to Money(-800, "INR")))
+                val refund = repo.refund(expense, Money(500, "INR"), day.plusDays(1))
+                assertEquals(listOf(300L, 200L), database.vaultDao().splits(owner, refund).map { it.amountMinor })
+                val totals = database.vaultDao().categorySpending(owner, day.toString(), day.plusDays(1).toString()).first()
+                assertEquals(900L, totals.single { it.categoryId == food }.totalMinor)
+                assertEquals(600L, totals.single { it.categoryId == shopping }.totalMinor)
+                assertEquals(-1_500L, database.vaultDao().netExpenseTotal(owner, day.toString(), day.plusDays(1).toString()).first())
+                assertEquals(0L, database.vaultDao().totalForKind(owner, "income", day.toString(), day.plusDays(1).toString()).first())
+                assertTrue(runCatching { repo.refund(expense, Money(1_501, "INR"), day.plusDays(2)) }.isFailure)
+                assertTrue(runCatching { repo.voidTransaction(expense) }.isFailure)
+                repo.voidTransaction(refund)
+                repo.voidTransaction(expense)
+                assertEquals(10_000L, repo.balances.first().single().balanceMinor)
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun deletingLocalVaultRemovesEncryptedSourceFiles() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

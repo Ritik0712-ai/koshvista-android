@@ -33,11 +33,12 @@ fun DailySpendingCard(spending: List<DailySpend>, onDay: (String) -> Unit) {
     val today = LocalDate.now()
     val days = (6 downTo 0).map { today.minusDays(it.toLong()).toString() }
     val totals = days.map { date -> spending.find { it.localDate == date }?.totalMinor ?: 0L }
-    val max = maxOf(totals.maxOrNull() ?: 0L, 1L).toFloat()
+    val hasRefundDay = totals.any { it < 0L }
+    val max = maxOf(totals.maxOfOrNull { kotlin.math.abs(it.toDouble()) } ?: 0.0, 1.0).toFloat()
     val expenseColor = MaterialTheme.colorScheme.error
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Daily spending", style = MaterialTheme.typography.titleMedium)
+            Text("Daily net spending", style = MaterialTheme.typography.titleMedium)
             Text("Last 7 days · INR", style = MaterialTheme.typography.bodySmall)
             Canvas(Modifier.fillMaxWidth().height(112.dp)
                 .pointerInput(days) { detectTapGestures { tap ->
@@ -46,10 +47,15 @@ fun DailySpendingCard(spending: List<DailySpend>, onDay: (String) -> Unit) {
                 } }
                 .semantics { contentDescription = days.zip(totals).joinToString { (day, total) -> "$day: ${formatMoney(total, "INR")}" } }) {
                 val slot = size.width / 7
+                if (hasRefundDay) drawLine(Color.Gray.copy(alpha = 0.5f), Offset(0f, size.height * 0.5f),
+                    Offset(size.width, size.height * 0.5f), 1.dp.toPx())
                 totals.forEachIndexed { index, total ->
-                    val height = (total / max) * size.height
+                    val availableHeight = if (hasRefundDay) size.height * 0.48f else size.height
+                    val height = (kotlin.math.abs(total.toDouble()).toFloat() / max) * availableHeight
+                    val baseline = if (hasRefundDay) size.height * 0.5f else size.height
                     drawRoundRect(expenseColor,
-                        topLeft = Offset(index * slot + slot * 0.17f, size.height - height),
+                        topLeft = Offset(index * slot + slot * 0.17f,
+                            if (total < 0L) baseline else baseline - height),
                         size = Size(slot * 0.66f, height),
                         cornerRadius = CornerRadius(5.dp.toPx()))
                 }
@@ -58,6 +64,7 @@ fun DailySpendingCard(spending: List<DailySpend>, onDay: (String) -> Unit) {
                 days.forEach { Text(it.takeLast(2), style = MaterialTheme.typography.bodySmall) }
             }
             Text("Tap a day to view its records", style = MaterialTheme.typography.bodySmall)
+            if (hasRefundDay) Text("Bars below the middle line show days with net refunds.", style = MaterialTheme.typography.bodySmall)
         }
     }
 }

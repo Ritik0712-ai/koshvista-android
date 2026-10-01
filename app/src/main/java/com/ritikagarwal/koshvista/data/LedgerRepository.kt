@@ -8,6 +8,7 @@ import com.ritikagarwal.koshvista.core.Position
 import com.ritikagarwal.koshvista.core.PositionMath
 import java.time.LocalDate
 import java.math.BigDecimal
+import java.math.RoundingMode
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -192,6 +193,9 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         val original = dao.transaction(ownerId, transactionId) ?: error("Transaction unavailable")
         require(original.status == "posted") { "Transaction is already void" }
         require(original.tradeId == null) { "Investment trades must be adjusted through the trade ledger" }
+        if (original.kind == "expense") require(dao.refundedMinor(ownerId, original.id) == 0L) {
+            "Reverse linked refunds before reversing this expense"
+        }
         val entries = original.transferGroupId?.let { dao.transferEntries(ownerId, it) } ?: listOf(original)
         require(entries.isNotEmpty() && entries.all { it.status == "posted" && it.tradeId == null })
         if (original.transferGroupId != null) require(entries.size == 2 && entries.sumOf { it.amountMinor } == 0L)
@@ -211,6 +215,38 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         if (existing == null) dao.insertBudget(BudgetEntity(ownerId, UUID.randomUUID().toString(),
             categoryId, limit.minor, limit.currencyCode, createdAtMs = now, updatedAtMs = now))
         else dao.updateBudget(existing.copy(limitMinor = limit.minor, status = "active", updatedAtMs = now))
+    }
+
+    suspend fun refund(originalExpenseId: String, amount: Money, date: LocalDate): String = database.withTransaction {
+        val original = dao.transaction(ownerId, originalExpenseId) ?: error("Original expense unavailable")
+        require(original.status == "posted" && original.kind == "expense")
+        val account = dao.account(ownerId, original.accountId) ?: error("Account unavailable")
+        require(account.status == "active" && amount.currencyCode == original.currencyCode)
+        require(date.toString() >= original.localDate) { "Refund predates the expense" }
+        require(amount.minor > 0)
+        val remaining = BigDecimal.valueOf(original.amountMinor).negate()
+            .subtract(BigDecimal.valueOf(dao.refundedMinor(ownerId, originalExpenseId))).longValueExact()
+        require(amount.minor <= remaining) { "Refund exceeds the remaining expense" }
+        val now = System.currentTimeMillis()
+        val id = UUID.randomUUID().toString()
+        dao.insertTransaction(TransactionEntity(ownerId, id, original.accountId, date.toString(),
+            "Refund: ${original.description}", original.categoryId, amount.minor, amount.currencyCode,
+            "refund", refundOfTransactionId = original.id, createdAtMs = now, updatedAtMs = now))
+        val originalSplits = dao.splits(ownerId, original.id)
+        if (originalSplits.isNotEmpty()) {
+            var allocated = 0L
+            originalSplits.forEachIndexed { index, split ->
+                val part = if (index == originalSplits.lastIndex) Math.subtractExact(amount.minor, allocated)
+                else minOf(Math.subtractExact(amount.minor, allocated),
+                    BigDecimal.valueOf(amount.minor).multiply(BigDecimal.valueOf(split.amountMinor).abs())
+                        .divide(BigDecimal.valueOf(original.amountMinor).abs(), 0, RoundingMode.HALF_EVEN).longValueExact())
+                allocated = Math.addExact(allocated, part)
+                dao.insertSplit(TransactionSplitEntity(ownerId, UUID.randomUUID().toString(), id,
+                    split.categoryId, part, null, index, now, now))
+            }
+            check(allocated == amount.minor)
+        }
+        id
     }
 
     /** Trade entries, funding transfer and fees are committed together. */

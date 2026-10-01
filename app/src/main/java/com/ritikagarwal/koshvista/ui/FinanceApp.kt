@@ -89,7 +89,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit, 
     val today = remember { LocalDate.now().toString() }
     val lastSevenStart = remember { LocalDate.now().minusDays(6).toString() }
     val income by remember(repository) { database.vaultDao().totalForKind(ownerId, "income", monthStart, today) }.collectAsState(0L)
-    val expense by remember(repository) { database.vaultDao().totalForKind(ownerId, "expense", monthStart, today) }.collectAsState(0L)
+    val expense by remember(repository) { database.vaultDao().netExpenseTotal(ownerId, monthStart, today) }.collectAsState(0L)
     val categoryTotals by remember(repository) { database.vaultDao().categorySpending(ownerId, monthStart, today) }.collectAsState(emptyList())
     val dailySpending by remember(repository) { database.vaultDao().dailySpending(ownerId, lastSevenStart, today) }.collectAsState(emptyList())
     val scope = rememberCoroutineScope()
@@ -99,6 +99,9 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit, 
     var addMenu by remember { mutableStateOf(false) }
     var selectedAccountId by remember { mutableStateOf<String?>(null) }
     var selectedTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
+    var refundingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
+    var refundAmount by remember { mutableStateOf("") }
+    var refundDate by remember { mutableStateOf(LocalDate.now().toString()) }
     var importAccountId by remember { mutableStateOf("") }
     var selectedImportId by remember { mutableStateOf<String?>(null) }
     var activityDay by remember { mutableStateOf<String?>(null) }
@@ -276,12 +279,32 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit, 
             Text("Type: ${transaction.kind.replace('_', ' ')}")
             if (transaction.sourceDocumentId != null) Text("Imported from a statement; original source is retained.")
             if (transaction.transferGroupId != null) Text("Both sides of this transfer will be reversed together.")
+            if (transaction.kind == "expense") TextButton(onClick = {
+                refundingTransaction = transaction; refundAmount = ""; refundDate = LocalDate.now().toString(); selectedTransaction = null
+            }) { Text("Record refund") }
         } },
         confirmButton = { Button(onClick = { scope.launch {
             try { repository.voidTransaction(transaction.id); selectedTransaction = null; snackbar.showSnackbar("Record reversed") }
             catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not reverse record") }
         } }) { Text("Reverse entry") } },
         dismissButton = { TextButton(onClick = { selectedTransaction = null }) { Text("Close") } }) }
+
+    refundingTransaction?.let { original -> AlertDialog(onDismissRequest = { refundingTransaction = null },
+        title = { Text("Refund for ${original.description}") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("The refund reduces the original expense category and credits its account.")
+            OutlinedTextField(refundAmount, { refundAmount = it }, label = { Text("Refund amount in INR") })
+            OutlinedTextField(refundDate, { refundDate = it }, label = { Text("Refund date YYYY-MM-DD") })
+        } },
+        confirmButton = { Button(onClick = { scope.launch {
+            try {
+                repository.refund(original.id, Money.parse(refundAmount, original.currencyCode), LocalDate.parse(refundDate))
+                refundingTransaction = null; snackbar.showSnackbar("Refund recorded")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not record refund") }
+        } }, enabled = runCatching {
+            LocalDate.parse(refundDate); Money.parse(refundAmount, original.currencyCode).minor > 0
+        }.getOrDefault(false)) { Text("Save refund") } },
+        dismissButton = { TextButton(onClick = { refundingTransaction = null }) { Text("Cancel") } }) }
 
     editor?.let { current -> when (current) {
         Editor.Trade -> TradeEditor(accounts.filter { it.type == "broker_cash" }, positions,
@@ -376,7 +399,7 @@ private fun HomeContent(
         item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(20.dp)) {
             Text("This month's cash flow", style = MaterialTheme.typography.titleMedium)
             Text("Income ${formatMoney(income, "INR")}")
-            Text("Spending ${formatMoney(-expense, "INR")}")
+            Text("Net spending ${formatMoney(-expense, "INR")}")
             Text("Transfers are excluded", style = MaterialTheme.typography.bodySmall)
         } } }
         item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

@@ -36,9 +36,9 @@ object LedgerMath {
 
     fun cashFlow(entries: Iterable<LedgerEntry>, currencyCode: String): CashFlow {
         val own = entries.filter { it.amount.currencyCode == currencyCode }
-        val income = own.filter { it.kind == EntryKind.INCOME || it.kind == EntryKind.REFUND }
+        val income = own.filter { it.kind == EntryKind.INCOME }
             .fold(Money(0, currencyCode)) { a, b -> a + b.amount }
-        val expense = own.filter { it.kind == EntryKind.EXPENSE || it.kind == EntryKind.FEE }
+        val expense = own.filter { it.kind == EntryKind.EXPENSE || it.kind == EntryKind.FEE || it.kind == EntryKind.REFUND }
             .fold(Money(0, currencyCode)) { a, b -> a + b.amount }
         return CashFlow(income, expense, income + expense)
     }
