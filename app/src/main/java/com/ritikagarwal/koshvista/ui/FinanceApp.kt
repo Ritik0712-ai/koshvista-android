@@ -252,26 +252,26 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 editor = null; snackbar.showSnackbar("Fixed deposit saved and funded")
             } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save fixed deposit") }
         } }
-        Editor.Account -> AccountEditor({ editor = null }) { type, name, amount -> scope.launch {
+        Editor.Account -> AccountEditor({ editor = null }) { type, name, amount, date -> scope.launch {
             try {
-                repository.addAccount(type, name, "INR", Money.parse(amount, "INR"), LocalDate.now())
+                repository.addAccount(type, name, "INR", Money.parse(amount, "INR"), LocalDate.parse(date))
                 editor = null; snackbar.showSnackbar("Account saved on this phone")
             } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Account could not be saved") }
         } }
-        Editor.Transfer -> TransferEditor(accounts, { editor = null }) { from, to, amount -> scope.launch {
+        Editor.Transfer -> TransferEditor(accounts, { editor = null }) { from, to, amount, date -> scope.launch {
             try {
-                repository.transfer(from, to, Money.parse(amount, "INR"), LocalDate.now())
+                repository.transfer(from, to, Money.parse(amount, "INR"), LocalDate.parse(date))
                 editor = null; snackbar.showSnackbar("Transfer saved on this phone")
             } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Transfer could not be saved") }
         } }
         else -> TransactionEditor(accounts, categories.filter { it.kind == if (current == Editor.Income) "income" else "expense" }
-            .map { it.id to it.name }, current, { editor = null }) { account, amount, description, category -> scope.launch {
+            .map { it.id to it.name }, current, { editor = null }) { account, amount, description, category, date -> scope.launch {
             try {
                 val entered = Money.parse(amount, "INR")
                 require(entered.minor > 0)
                 val kind = if (current == Editor.Income) EntryKind.INCOME else EntryKind.EXPENSE
                 repository.addTransaction(account, kind, if (kind == EntryKind.EXPENSE) -entered else entered,
-                    LocalDate.now(), description, category)
+                    LocalDate.parse(date), description, category)
                 editor = null; snackbar.showSnackbar("Transaction saved on this phone")
             } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Transaction could not be saved") }
         } }
@@ -534,54 +534,65 @@ private fun PlainContent(title: String, description: String, modifier: Modifier)
 }
 
 @Composable
-private fun AccountEditor(onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
+private fun AccountEditor(onDismiss: () -> Unit, onSave: (String, String, String, String) -> Unit) {
     var type by remember { mutableStateOf("bank") }
     var name by remember { mutableStateOf("") }
     var opening by remember { mutableStateOf("0") }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Add account") }, text = { Column {
-        listOf("bank", "cash", "credit_card", "broker_cash", "asset", "liability").forEach {
+    var openingDate by remember { mutableStateOf(LocalDate.now().toString()) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Add account") }, text = { LazyColumn {
+        items(listOf("bank", "cash", "credit_card", "broker_cash", "asset", "liability")) {
             FilterChip(selected = type == it, onClick = { type = it }, label = { Text(it.replace('_', ' ')) })
         }
-        OutlinedTextField(name, { name = it }, label = { Text("Account name") })
-        OutlinedTextField(opening, { opening = it }, label = { Text("Opening balance in INR") })
-    } }, confirmButton = { Button(onClick = { onSave(type, name, opening) }, enabled = name.isNotBlank()) { Text("Save account") } },
+        item { OutlinedTextField(name, { name = it }, label = { Text("Account name") }) }
+        item { OutlinedTextField(opening, { opening = it }, label = { Text("Opening balance in INR") }) }
+        item { OutlinedTextField(openingDate, { openingDate = it }, label = { Text("Opening date YYYY-MM-DD") }) }
+    } }, confirmButton = { Button(onClick = { onSave(type, name, opening, openingDate) },
+        enabled = name.isNotBlank() && runCatching { LocalDate.parse(openingDate); Money.parse(opening, "INR") }.isSuccess) { Text("Save account") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable
 private fun TransactionEditor(
     accounts: List<AccountEntity>, categories: List<Pair<String, String>>, kind: Editor,
-    onDismiss: () -> Unit, onSave: (String, String, String, String?) -> Unit,
+    onDismiss: () -> Unit, onSave: (String, String, String, String?, String) -> Unit,
 ) {
     val options = if (kind == Editor.CashExpense) accounts.filter { it.type == "cash" } else accounts
     var accountId by remember { mutableStateOf(options.firstOrNull()?.id ?: "") }
     var amount by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
     var categoryId by remember { mutableStateOf<String?>(null) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (kind == Editor.Income) "Add income" else "Add expense") }, text = { Column {
-        if (options.isEmpty()) Text("Add an account first to record this transaction.")
-        options.forEach { FilterChip(selected = accountId == it.id, onClick = { accountId = it.id }, label = { Text(it.name) }) }
-        OutlinedTextField(amount, { amount = it }, label = { Text("Amount in INR") })
-        OutlinedTextField(description, { description = it }, label = { Text("Description") })
-        categories.forEach { (id, name) -> FilterChip(selected = categoryId == id, onClick = { categoryId = id }, label = { Text(name) }) }
-    } }, confirmButton = { Button(onClick = { onSave(accountId, amount, description, categoryId) },
-        enabled = accountId.isNotBlank() && amount.isNotBlank() && description.isNotBlank()) { Text("Save transaction") } },
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (kind == Editor.Income) "Add income" else "Add expense") }, text = { LazyColumn {
+        if (options.isEmpty()) item { Text("Add an account first to record this transaction.") }
+        items(options, key = { it.id }) { FilterChip(selected = accountId == it.id, onClick = { accountId = it.id }, label = { Text(it.name) }) }
+        item { OutlinedTextField(amount, { amount = it }, label = { Text("Amount in INR") }) }
+        item { OutlinedTextField(description, { description = it }, label = { Text("Description") }) }
+        item { OutlinedTextField(date, { date = it }, label = { Text("Date YYYY-MM-DD") }) }
+        items(categories, key = { it.first }) { (id, name) -> FilterChip(selected = categoryId == id, onClick = { categoryId = id }, label = { Text(name) }) }
+    } }, confirmButton = { Button(onClick = { onSave(accountId, amount, description, categoryId, date) },
+        enabled = accountId.isNotBlank() && description.isNotBlank() && runCatching {
+            LocalDate.parse(date); Money.parse(amount, "INR").minor > 0
+        }.getOrDefault(false)) { Text("Save transaction") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable
-private fun TransferEditor(accounts: List<AccountEntity>, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
+private fun TransferEditor(accounts: List<AccountEntity>, onDismiss: () -> Unit, onSave: (String, String, String, String) -> Unit) {
     var from by remember { mutableStateOf(accounts.firstOrNull()?.id ?: "") }
     var to by remember { mutableStateOf(accounts.getOrNull(1)?.id ?: "") }
     var amount by remember { mutableStateOf("") }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Transfer") }, text = { Column {
-        Text("From")
-        accounts.forEach { FilterChip(selected = from == it.id, onClick = { from = it.id }, label = { Text(it.name) }) }
-        Text("To")
-        accounts.forEach { FilterChip(selected = to == it.id, onClick = { to = it.id }, label = { Text(it.name) }) }
-        OutlinedTextField(amount, { amount = it }, label = { Text("Amount in INR") })
-    } }, confirmButton = { Button(onClick = { onSave(from, to, amount) },
-        enabled = from.isNotBlank() && to.isNotBlank() && from != to && amount.isNotBlank()) { Text("Save transfer") } },
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Transfer") }, text = { LazyColumn {
+        item { Text("From") }
+        items(accounts, key = { "from-${it.id}" }) { FilterChip(selected = from == it.id, onClick = { from = it.id }, label = { Text(it.name) }) }
+        item { Text("To") }
+        items(accounts, key = { "to-${it.id}" }) { FilterChip(selected = to == it.id, onClick = { to = it.id }, label = { Text(it.name) }) }
+        item { OutlinedTextField(amount, { amount = it }, label = { Text("Amount in INR") }) }
+        item { OutlinedTextField(date, { date = it }, label = { Text("Date YYYY-MM-DD") }) }
+    } }, confirmButton = { Button(onClick = { onSave(from, to, amount, date) },
+        enabled = from.isNotBlank() && to.isNotBlank() && from != to && runCatching {
+            LocalDate.parse(date); Money.parse(amount, "INR").minor > 0
+        }.getOrDefault(false)) { Text("Save transfer") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
