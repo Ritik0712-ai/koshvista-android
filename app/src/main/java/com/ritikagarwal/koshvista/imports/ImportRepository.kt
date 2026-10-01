@@ -13,6 +13,8 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.UUID
+import java.time.LocalDate
+import com.ritikagarwal.koshvista.core.Money
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -84,6 +86,23 @@ class ImportRepository(
             require(candidate.description.isNotBlank())
         }
         dao.updateCandidate(candidate.copy(decision = decision, updatedAtMs = System.currentTimeMillis()))
+    }
+
+    suspend fun editCandidate(candidateId: String, date: String, description: String, signedAmount: String) = database.withTransaction {
+        val candidate = dao.candidate(ownerId, candidateId) ?: error("Candidate unavailable")
+        val job = dao.job(ownerId, candidate.jobId) ?: error("Import unavailable")
+        require(job.status == "review")
+        val parsedDate = LocalDate.parse(date.trim()).toString()
+        val parsedAmount = Money.parse(signedAmount, candidate.currencyCode)
+        require(parsedAmount.minor != 0L) { "Amount must not be zero" }
+        require(description.isNotBlank()) { "Description is required" }
+        val normalDescription = description.trim()
+        val fingerprint = sha256("${job.accountId}|$parsedDate|${parsedAmount.minor}|${normalDescription.lowercase()}".toByteArray())
+        val possibleDuplicate = ledgerDao.fingerprintCount(ownerId, job.accountId, fingerprint) > 0
+        dao.updateCandidate(candidate.copy(localDate = parsedDate, description = normalDescription,
+            amountMinor = parsedAmount.minor, fingerprint = fingerprint,
+            reviewReasons = if (possibleDuplicate) "Possible duplicate; confirm before accepting" else "Edited; confirm before accepting",
+            decision = "unreviewed", updatedAtMs = System.currentTimeMillis()))
     }
 
     suspend fun commit(jobId: String): Int = database.withTransaction {

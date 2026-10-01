@@ -145,4 +145,34 @@ class VaultIntegrationTest {
             factory.delete(owner)
         }
     }
+
+    @Test fun uncertainImportRowCanBeCorrectedBeforePosting() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        var sourceRef: String? = null
+        try {
+            val database = factory.open(owner)
+            try {
+                val ledger = LedgerRepository(owner, database)
+                ledger.initialiseOwner("Tester")
+                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.now())
+                val importer = ImportRepository(owner, database, context)
+                val job = importer.stageCsv(bank, "uncertain.csv",
+                    "Date,Description,Amount,Type\n03/04/2026,Cafe,12.50,unknown\n".toByteArray())
+                val candidate = importer.candidates(job).first().single()
+                assertEquals("unreviewed", candidate.decision)
+                assertTrue(runCatching { importer.editCandidate(candidate.id, "invalid", "Cafe", "-12.50") }.isFailure)
+                importer.editCandidate(candidate.id, "2026-04-03", "Cafe", "-12.50")
+                assertEquals("unreviewed", importer.candidates(job).first().single().decision)
+                importer.decide(candidate.id, "accepted")
+                assertEquals(1, importer.commit(job))
+                assertEquals(-1250L, ledger.recentTransactions.first().single().amountMinor)
+                sourceRef = database.importDao().document(owner, database.importDao().job(owner, job)!!.documentId)!!.encryptedFileRef
+            } finally { database.close() }
+        } finally {
+            sourceRef?.let { DocumentStore(context).delete(owner, it) }
+            factory.delete(owner)
+        }
+    }
 }

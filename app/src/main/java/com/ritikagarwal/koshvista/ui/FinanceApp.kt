@@ -277,6 +277,7 @@ private fun ImportContent(
 ) {
     val scope = rememberCoroutineScope()
     var message by remember { mutableStateOf<String?>(null) }
+    var editing by remember { mutableStateOf<ImportCandidateEntity?>(null) }
     val selectedJob = jobs.find { it.id == selectedJobId }
     val candidateFlow = remember(repository, selectedJobId) { selectedJobId?.let(repository::candidates) }
     val candidates by candidateFlow?.collectAsState(emptyList()) ?: remember { mutableStateOf(emptyList()) }
@@ -308,6 +309,7 @@ private fun ImportContent(
                     Text(candidate.reviewReasons.ifBlank { "Ready" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("Decision: ${candidate.decision}")
                     if (selectedJob.status == "review") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { editing = candidate }) { Text("Edit") }
                         if (candidate.localDate != null && candidate.amountMinor != null && candidate.amountMinor != 0L && candidate.description.isNotBlank()) {
                             TextButton(onClick = { scope.launch {
                                 try { repository.decide(candidate.id, "accepted") } catch (error: Exception) { message = error.message }
@@ -329,6 +331,25 @@ private fun ImportContent(
             } }
             item { TextButton(onClick = { onSelectJob(null) }) { Text("Back to imports") } }
         }
+    }
+    editing?.let { candidate ->
+        var date by remember(candidate.id) { mutableStateOf(candidate.localDate.orEmpty()) }
+        var description by remember(candidate.id) { mutableStateOf(candidate.description) }
+        var signedAmount by remember(candidate.id) { mutableStateOf(candidate.amountMinor?.let {
+            BigDecimal.valueOf(it).movePointLeft(2).toPlainString()
+        }.orEmpty()) }
+        AlertDialog(onDismissRequest = { editing = null }, title = { Text("Edit statement row ${candidate.sourceRow}") },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Enter a negative amount for money out, positive for money in.")
+                OutlinedTextField(date, { date = it }, label = { Text("Date YYYY-MM-DD") })
+                OutlinedTextField(description, { description = it }, label = { Text("Description") })
+                OutlinedTextField(signedAmount, { signedAmount = it }, label = { Text("Signed amount in INR") })
+            } },
+            confirmButton = { Button(onClick = { scope.launch {
+                try { repository.editCandidate(candidate.id, date, description, signedAmount); editing = null }
+                catch (error: Exception) { message = error.message ?: "Could not edit row" }
+            } }) { Text("Save changes") } },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text("Cancel") } })
     }
 }
 
