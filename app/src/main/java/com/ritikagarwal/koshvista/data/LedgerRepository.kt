@@ -5,6 +5,7 @@ import com.ritikagarwal.koshvista.core.EntryKind
 import com.ritikagarwal.koshvista.core.LedgerMath
 import com.ritikagarwal.koshvista.core.Money
 import java.time.LocalDate
+import java.math.BigDecimal
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
@@ -16,6 +17,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
     val balances: Flow<List<AccountBalance>> = dao.balances(ownerId)
     val categories: Flow<List<CategoryEntity>> = dao.categories(ownerId)
     val recentTransactions: Flow<List<TransactionEntity>> = dao.transactions(ownerId, 100, 0)
+    val fixedDeposits: Flow<List<FixedDepositEntity>> = dao.fixedDeposits(ownerId)
 
     suspend fun initialiseOwner(displayName: String?) = database.withTransaction {
         if (dao.owner(ownerId) == null) {
@@ -105,5 +107,41 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
             dao.insertSplit(TransactionSplitEntity(ownerId, UUID.randomUUID().toString(), transactionId, categoryId,
                 amount.minor, null, position, now, now))
         }
+    }
+
+    /** Moves principal into an asset account in the same transaction as the contract. */
+    suspend fun createFixedDeposit(
+        sourceAccountId: String,
+        name: String,
+        institutionName: String,
+        principal: Money,
+        annualRate: BigDecimal,
+        start: LocalDate,
+        maturity: LocalDate,
+    ): String = database.withTransaction {
+        require(name.isNotBlank() && institutionName.isNotBlank())
+        require(principal.minor > 0)
+        require(maturity > start)
+        require(annualRate >= BigDecimal.ZERO && annualRate <= BigDecimal.ONE)
+        val source = dao.account(ownerId, sourceAccountId) ?: error("Funding account unavailable")
+        require(source.status == "active" && source.type in setOf("bank", "cash", "broker_cash"))
+        require(source.currencyCode == principal.currencyCode)
+        val now = System.currentTimeMillis()
+        val id = UUID.randomUUID().toString()
+        val assetId = UUID.randomUUID().toString()
+        dao.insertAccount(AccountEntity(ownerId, assetId, "asset", name.trim(), institutionName.trim(),
+            principal.currencyCode, 0, start.toString(), createdAtMs = now, updatedAtMs = now))
+        val group = UUID.randomUUID().toString()
+        val (debit, credit) = LedgerMath.transfer(sourceAccountId, assetId, principal, start)
+        listOf(debit, credit).forEach { entry ->
+            dao.insertTransaction(TransactionEntity(ownerId, UUID.randomUUID().toString(), entry.accountId,
+                start.toString(), "Fixed deposit funding: ${name.trim()}", null, entry.amount.minor,
+                principal.currencyCode, "transfer", transferGroupId = group, createdAtMs = now, updatedAtMs = now))
+        }
+        dao.insertFixedDeposit(FixedDepositEntity(ownerId, id, name.trim(), institutionName.trim(), assetId,
+            principal.minor, principal.currencyCode, start.toString(), maturity.toString(),
+            annualRate.stripTrailingZeros().toPlainString(), createdAtMs = now, updatedAtMs = now))
+        check(dao.transferEntries(ownerId, group).sumOf { it.amountMinor } == 0L)
+        id
     }
 }

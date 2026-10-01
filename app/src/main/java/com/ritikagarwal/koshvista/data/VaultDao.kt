@@ -92,4 +92,8 @@ interface VaultDao {
     @Insert suspend fun insertSplit(split: TransactionSplitEntity)
     @Query("SELECT * FROM transaction_splits WHERE ownerId = :ownerId AND transactionId = :transactionId ORDER BY position")
     suspend fun splits(ownerId: String, transactionId: String): List<TransactionSplitEntity>
+
+    @Insert suspend fun insertFixedDeposit(contract: FixedDepositEntity)
+    @Query("SELECT * FROM fixed_deposits WHERE ownerId = :ownerId AND status = 'active' ORDER BY maturityLocalDate")
+    fun fixedDeposits(ownerId: String): Flow<List<FixedDepositEntity>>
 }

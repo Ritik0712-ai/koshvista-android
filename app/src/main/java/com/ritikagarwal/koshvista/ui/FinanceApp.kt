@@ -41,12 +41,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ritikagarwal.koshvista.core.EntryKind
 import com.ritikagarwal.koshvista.core.Money
+import com.ritikagarwal.koshvista.core.LedgerMath
 import com.ritikagarwal.koshvista.data.AccountBalance
 import com.ritikagarwal.koshvista.data.AccountEntity
 import com.ritikagarwal.koshvista.data.LedgerRepository
 import com.ritikagarwal.koshvista.data.ImportJobEntity
 import com.ritikagarwal.koshvista.data.ImportCandidateEntity
 import com.ritikagarwal.koshvista.data.TransactionEntity
+import com.ritikagarwal.koshvista.data.FixedDepositEntity
 import com.ritikagarwal.koshvista.data.VaultDatabase
 import com.ritikagarwal.koshvista.imports.ImportRepository
 import java.math.BigDecimal
@@ -59,7 +61,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class Tab { Home, Activity, Import, Wealth, Settings }
-private enum class Editor { Account, Expense, Income, CashExpense, Transfer }
+private enum class Editor { Account, Expense, Income, CashExpense, Transfer, FixedDeposit }
 
 @Composable
 fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) {
@@ -70,6 +72,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val balances by repository.balances.collectAsState(emptyList())
     val categories by repository.categories.collectAsState(emptyList())
     val importJobs by importRepository.history.collectAsState(emptyList())
+    val fixedDeposits by repository.fixedDeposits.collectAsState(emptyList())
     val monthStart = remember { LocalDate.now().withDayOfMonth(1).toString() }
     val today = remember { LocalDate.now().toString() }
     val lastSevenStart = remember { LocalDate.now().minusDays(6).toString() }
@@ -141,7 +144,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                     try { val count = importRepository.commit(id); snackbar.showSnackbar("Saved $count transactions on this phone") }
                     catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save import") }
                 } }, modifier = Modifier.padding(padding))
-            Tab.Wealth -> WealthContent(balances, Modifier.padding(padding))
+            Tab.Wealth -> WealthContent(balances, fixedDeposits, { editor = Editor.FixedDeposit }, Modifier.padding(padding))
             Tab.Settings -> Column(Modifier.padding(padding).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Settings", style = MaterialTheme.typography.headlineMedium)
                 Text("Cloud backup is not configured in this build. Records currently remain on this phone.")
@@ -154,6 +157,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
         text = { Column { listOf(
             Editor.Expense to "Expense", Editor.Income to "Income", Editor.Transfer to "Transfer",
             Editor.CashExpense to "Cash expense", Editor.Account to "Account",
+            Editor.FixedDeposit to "Fixed deposit",
         ).forEach { (choice, label) -> TextButton(onClick = { editor = choice; addMenu = false }) { Text(label) } } } },
         confirmButton = { TextButton(onClick = { addMenu = false }) { Text("Close") } })
 
@@ -164,6 +168,13 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
         confirmButton = { TextButton(onClick = { selectedAccount = null }) { Text("Close") } }) }
 
     editor?.let { current -> when (current) {
+        Editor.FixedDeposit -> FixedDepositEditor(accounts, { editor = null }) { source, name, institution, principal, rate, maturity -> scope.launch {
+            try {
+                repository.createFixedDeposit(source, name, institution, Money.parse(principal, "INR"),
+                    rate.trim().toBigDecimal().movePointLeft(2), LocalDate.now(), LocalDate.parse(maturity))
+                editor = null; snackbar.showSnackbar("Fixed deposit saved and funded")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save fixed deposit") }
+        } }
         Editor.Account -> AccountEditor({ editor = null }) { type, name, amount -> scope.launch {
             try {
                 repository.addAccount(type, name, "INR", Money.parse(amount, "INR"), LocalDate.now())
@@ -322,15 +333,60 @@ private fun ImportContent(
 }
 
 @Composable
-private fun WealthContent(balances: List<AccountBalance>, modifier: Modifier) {
-    val assets = balances.filter { it.type == "asset" || it.type == "broker_cash" }
+private fun WealthContent(balances: List<AccountBalance>, deposits: List<FixedDepositEntity>,
+    onAddDeposit: () -> Unit, modifier: Modifier) {
+    val depositAccountIds = deposits.mapTo(mutableSetOf()) { it.assetAccountId }
+    val assets = balances.filter { (it.type == "asset" || it.type == "broker_cash") && it.id !in depositAccountIds }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Wealth", style = MaterialTheme.typography.headlineMedium) }
+        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Fixed deposits", style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = onAddDeposit) { Text("Add") }
+        } }
+        if (deposits.isEmpty()) item { Text("No fixed deposits yet. Add one to track its principal and estimated maturity.") }
+        items(deposits, key = { it.id }) { deposit ->
+            val projected = LedgerMath.simpleMaturity(Money(deposit.principalMinor, deposit.currencyCode),
+                deposit.annualRateDecimal.toBigDecimal(), LocalDate.parse(deposit.startLocalDate), LocalDate.parse(deposit.maturityLocalDate))
+            Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(deposit.name, fontWeight = FontWeight.SemiBold)
+                Text("${deposit.institutionName} · Matures ${deposit.maturityLocalDate}")
+                Text("Principal ${formatMoney(deposit.principalMinor, deposit.currencyCode)}")
+                Text("Estimated maturity ${formatMoney(projected.minor, projected.currencyCode)}",
+                    style = MaterialTheme.typography.bodyMedium)
+                Text("Simple interest estimate; actual proceeds may differ.", style = MaterialTheme.typography.bodySmall)
+            } }
+        }
         item { Text("Broker cash and other assets", style = MaterialTheme.typography.titleMedium) }
         if (assets.isEmpty()) item { Text("No investment assets recorded yet.") }
         items(assets) { account -> Card(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(18.dp),
             horizontalArrangement = Arrangement.SpaceBetween) { Text(account.name); Text(formatMoney(account.balanceMinor, account.currencyCode)) } } }
     }
+}
+
+@Composable
+private fun FixedDepositEditor(accounts: List<AccountEntity>, onDismiss: () -> Unit,
+    onSave: (String, String, String, String, String, String) -> Unit) {
+    val sources = accounts.filter { it.type in setOf("bank", "cash", "broker_cash") }
+    var source by remember { mutableStateOf(sources.firstOrNull()?.id.orEmpty()) }
+    var name by remember { mutableStateOf("") }
+    var institution by remember { mutableStateOf("") }
+    var principal by remember { mutableStateOf("") }
+    var rate by remember { mutableStateOf("") }
+    var maturity by remember { mutableStateOf("") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Add fixed deposit") },
+        text = { LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            item { Text("Fund from") }
+            items(sources, key = { it.id }) { account -> FilterChip(source == account.id,
+                onClick = { source = account.id }, label = { Text(account.name) }) }
+            item { OutlinedTextField(name, { name = it }, label = { Text("Deposit name") }) }
+            item { OutlinedTextField(institution, { institution = it }, label = { Text("Institution") }) }
+            item { OutlinedTextField(principal, { principal = it }, label = { Text("Principal in INR") }) }
+            item { OutlinedTextField(rate, { rate = it }, label = { Text("Annual rate %") }) }
+            item { OutlinedTextField(maturity, { maturity = it }, label = { Text("Maturity date YYYY-MM-DD") }) }
+        } },
+        confirmButton = { Button(onClick = { onSave(source, name, institution, principal, rate, maturity) },
+            enabled = source.isNotBlank() && name.isNotBlank() && institution.isNotBlank() && principal.isNotBlank() && rate.isNotBlank() && maturity.isNotBlank()) { Text("Save deposit") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable

@@ -7,6 +7,7 @@ import com.ritikagarwal.koshvista.core.EntryKind
 import com.ritikagarwal.koshvista.imports.ImportRepository
 import com.ritikagarwal.koshvista.security.DocumentStore
 import java.time.LocalDate
+import java.math.BigDecimal
 import java.util.UUID
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -17,6 +18,35 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun fixedDepositFundingIsAtomicAndDoesNotInflateNetWorth() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val start = LocalDate.of(2026, 1, 1)
+                repo.initialiseOwner("Tester")
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(100_000, "INR"), start)
+                val failed = runCatching { repo.createFixedDeposit(bank, "Invalid", "Bank", Money(20_000, "INR"),
+                    BigDecimal("0.075"), start, start) }
+                assertTrue(failed.isFailure)
+                assertEquals(1, repo.balances.first().size)
+                val id = repo.createFixedDeposit(bank, "One year FD", "Bank", Money(20_000, "INR"),
+                    BigDecimal("0.075"), start, start.plusYears(1))
+                val contract = repo.fixedDeposits.first().single()
+                assertEquals(id, contract.id)
+                assertEquals("0.075", contract.annualRateDecimal)
+                val balances = repo.balances.first()
+                assertEquals(100_000L, balances.sumOf { it.balanceMinor })
+                assertEquals(80_000L, balances.single { it.id == bank }.balanceMinor)
+                assertEquals(20_000L, balances.single { it.id == contract.assetAccountId }.balanceMinor)
+                assertEquals(0L, database.vaultDao().totalForKind(owner, "expense", start.toString(), start.toString()).first())
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun spendingChartsReconcileWithSplitExpensesAndIgnoreTransfers() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)
