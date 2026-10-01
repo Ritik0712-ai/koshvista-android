@@ -30,5 +30,25 @@ render.experimental.xml
 # Google Services (e.g. APIs or Firebase)
 google-services.json
 
+# Private finance data and release credentials
+.gradle-home/
+tooling/
+*.db
+*.sqlite
+*.sqlite3
+*.pdf
+*.csv
+*.pem
+*.p12
+*.key
+*.asc
+*.zip
+*.koshvault
+credentials*.json
+client_secret*.json
+signing.properties
+secrets.properties
+private-fixtures/
+
 # Android Profiling
 *.hprof
