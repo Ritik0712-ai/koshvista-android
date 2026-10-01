@@ -8,7 +8,7 @@ This checkout is under active implementation. A passing debug build is not a cer
 
 Open the project in Android Studio or run `./gradlew :app:assembleDebug :app:testDebugUnitTest` with Android SDK 36 installed. The app never needs banking passwords, PINs, or OTPs.
 
-Google sign-in is compiled behind an optional `KOSHVISTA_GOOGLE_WEB_CLIENT_ID` Gradle property, supplied when building with `-PKOSHVISTA_GOOGLE_WEB_CLIENT_ID=...`. Do not add local configuration to Git. The client must be registered for this Android package and the signing certificate. Until configured, the debug build offers a clearly labelled local development vault; release builds require Google sign-in configuration before they can hold records. Google Drive consent and tested cloud recovery are not yet implemented.
+Google sign-in is compiled behind an optional `KOSHVISTA_GOOGLE_WEB_CLIENT_ID` Gradle property, supplied when building with `-PKOSHVISTA_GOOGLE_WEB_CLIENT_ID=...`. Do not add local configuration to Git. The client must be registered for this Android package and the signing certificate. Until configured, the debug build offers a clearly labelled local development vault; release builds require Google sign-in configuration before they can hold records. Settings supports a passphrase-encrypted local backup and restore into an empty vault for the same owner identity. The local archive currently has a 100 MB size limit. Google Drive consent and tested cloud recovery are not yet implemented.
 
 ## Privacy and contributions
 

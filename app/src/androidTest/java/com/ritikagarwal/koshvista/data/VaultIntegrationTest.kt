@@ -3,6 +3,7 @@ package com.ritikagarwal.koshvista.data
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ritikagarwal.koshvista.core.Money
+import com.ritikagarwal.koshvista.backup.LocalVaultBackup
 import com.ritikagarwal.koshvista.core.EntryKind
 import com.ritikagarwal.koshvista.imports.ImportRepository
 import com.ritikagarwal.koshvista.security.DocumentStore
@@ -18,6 +19,54 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun encryptedLocalBackupRestoresLedgerAndSourceOnNewVaultKey() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        val backup = LocalVaultBackup(context)
+        val passphrase = "synthetic recovery words only".toCharArray()
+        var oldRef: String? = null
+        var newRef: String? = null
+        try {
+            val first = factory.open(owner)
+            val archive = try {
+                val repo = LedgerRepository(owner, first)
+                repo.initialiseOwner("Tester")
+                val day = LocalDate.of(2026, 10, 1)
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(50_000, "INR"), day)
+                val food = repo.categories.first().first { it.name == "Food" }.id
+                repo.setMonthlyBudget(food, Money(10_000, "INR"))
+                val importer = ImportRepository(owner, first, context)
+                val job = importer.stageCsv(bank, "sample.csv", "Date,Description,Debit,Credit\n2026-10-01,Cafe,12.50,\n".toByteArray())
+                importer.commit(job)
+                oldRef = first.importDao().document(owner, first.importDao().job(owner, job)!!.documentId)!!.encryptedFileRef
+                backup.create(owner, first, passphrase)
+            } finally { first.close() }
+            oldRef?.let { DocumentStore(context).delete(owner, it) }
+            factory.delete(owner)
+
+            val restored = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, restored)
+                repo.initialiseOwner("Tester")
+                assertTrue(runCatching { backup.restore(owner, restored, "wrong recovery words".toCharArray(), archive) }.isFailure)
+                backup.restore(owner, restored, passphrase, archive)
+                assertEquals(1, repo.recentTransactions.first().size)
+                assertEquals(48_750L, repo.balances.first().single().balanceMinor)
+                assertEquals(10_000L, repo.budgets.first().single().limitMinor)
+                val job = restored.importDao().jobs(owner).first().single()
+                newRef = restored.importDao().document(owner, job.documentId)!!.encryptedFileRef
+                assertEquals("Date,Description,Debit,Credit\n2026-10-01,Cafe,12.50,\n",
+                    String(DocumentStore(context).read(owner, newRef!!)))
+                assertTrue(runCatching { backup.restore(owner, restored, passphrase, archive) }.isFailure)
+            } finally { restored.close() }
+        } finally {
+            newRef?.let { DocumentStore(context).delete(owner, it) }
+            factory.delete(owner)
+            passphrase.fill('\u0000')
+        }
+    }
+
     @Test fun monthlyBudgetUsesExpenseOnlyAndCanBeUpdated() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

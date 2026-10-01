@@ -39,8 +39,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.ritikagarwal.koshvista.core.EntryKind
+import com.ritikagarwal.koshvista.backup.LocalVaultBackup
 import com.ritikagarwal.koshvista.core.Money
 import com.ritikagarwal.koshvista.core.LedgerMath
 import com.ritikagarwal.koshvista.data.AccountBalance
@@ -70,6 +72,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val context = LocalContext.current
     val repository = remember(ownerId, database) { LedgerRepository(ownerId, database) }
     val importRepository = remember(ownerId, database) { ImportRepository(ownerId, database, context) }
+    val localBackup = remember(context) { LocalVaultBackup(context) }
     val accounts by repository.accounts.collectAsState(emptyList())
     val balances by repository.balances.collectAsState(emptyList())
     val categories by repository.categories.collectAsState(emptyList())
@@ -95,6 +98,8 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var activityDay by remember { mutableStateOf<String?>(null) }
     var activityCategory by remember { mutableStateOf<String?>(null) }
     var categoryFilterActive by remember { mutableStateOf(false) }
+    var backupAction by remember { mutableStateOf<String?>(null) }
+    var recoveryPassphrase by remember { mutableStateOf("") }
     val filteredActivity = remember(repository, activityDay, activityCategory, categoryFilterActive) {
         when {
             activityDay != null -> database.vaultDao().transactionsForDay(ownerId, activityDay!!)
@@ -117,6 +122,32 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 snackbar.showSnackbar("Review the statement before saving")
             } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not analyse the file") }
         }
+    }
+    val backupPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) scope.launch {
+            val secret = recoveryPassphrase.toCharArray()
+            try {
+                val archive = withContext(Dispatchers.IO) { localBackup.create(ownerId, database, secret) }
+                withContext(Dispatchers.IO) { context.contentResolver.openOutputStream(uri)?.use { it.write(archive) }
+                    ?: error("Could not write backup file") }
+                snackbar.showSnackbar("Encrypted backup saved. Keep the passphrase separately.")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Backup could not be saved") }
+            finally { secret.fill('\u0000'); recoveryPassphrase = "" }
+        } else recoveryPassphrase = ""
+    }
+    val restorePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            val secret = recoveryPassphrase.toCharArray()
+            try {
+                val archive = withContext(Dispatchers.IO) { context.contentResolver.openInputStream(uri)?.use {
+                    it.readNBytes(100 * 1024 * 1024 + 1)
+                } ?: error("Could not open backup file") }
+                withContext(Dispatchers.IO) { localBackup.restore(ownerId, database, secret, archive) }
+                snackbar.showSnackbar("Vault restored. Reopen it to see the recovered records.")
+                onSignOut()
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Restore failed") }
+            finally { secret.fill('\u0000'); recoveryPassphrase = "" }
+        } else recoveryPassphrase = ""
     }
 
     LaunchedEffect(repository) { repository.initialiseOwner(null) }
@@ -153,7 +184,9 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             Tab.Wealth -> WealthContent(balances, fixedDeposits, { editor = Editor.FixedDeposit }, Modifier.padding(padding))
             Tab.Settings -> Column(Modifier.padding(padding).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Settings", style = MaterialTheme.typography.headlineMedium)
-                Text("Cloud backup is not configured in this build. Records currently remain on this phone.")
+                Text("Create an encrypted backup file and keep its passphrase separately. Google Drive sync will be available after cloud access is configured.")
+                Button(onClick = { backupAction = "create" }) { Text("Create local backup") }
+                Button(onClick = { backupAction = "restore" }) { Text("Restore from backup file") }
                 Button(onClick = onSignOut) { Text("Lock and sign out") }
             }
         }
@@ -167,6 +200,21 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             Editor.Budget to "Monthly budget",
         ).forEach { (choice, label) -> TextButton(onClick = { editor = choice; addMenu = false }) { Text(label) } } } },
         confirmButton = { TextButton(onClick = { addMenu = false }) { Text("Close") } })
+
+    backupAction?.let { action -> AlertDialog(onDismissRequest = { backupAction = null; recoveryPassphrase = "" },
+        title = { Text(if (action == "create") "Encrypt your backup" else "Restore your vault") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (action == "create") "Use at least 12 characters. Losing this passphrase means the archive cannot be restored."
+                else "Restoration requires the same owner identity and an empty vault. Existing records will not be overwritten.")
+            OutlinedTextField(recoveryPassphrase, { recoveryPassphrase = it }, label = { Text("Recovery passphrase") },
+                visualTransformation = PasswordVisualTransformation())
+        } },
+        confirmButton = { Button(onClick = {
+            if (action == "create") backupPicker.launch("KoshVista-${LocalDate.now()}.kvbackup")
+            else restorePicker.launch(arrayOf("*/*"))
+            backupAction = null
+        }, enabled = recoveryPassphrase.length >= 12) { Text(if (action == "create") "Choose save location" else "Choose backup file") } },
+        dismissButton = { TextButton(onClick = { backupAction = null; recoveryPassphrase = "" }) { Text("Cancel") } }) }
 
     selectedAccount?.let { account -> AlertDialog(onDismissRequest = { selectedAccount = null },
         title = { Text(account.name) },
