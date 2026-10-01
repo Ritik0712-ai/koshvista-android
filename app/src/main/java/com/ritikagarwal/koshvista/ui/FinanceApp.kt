@@ -62,7 +62,7 @@ private enum class Tab { Home, Activity, Import, Wealth, Settings }
 private enum class Editor { Account, Expense, Income, CashExpense, Transfer }
 
 @Composable
-fun FinanceApp(ownerId: String, database: VaultDatabase) {
+fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) {
     val context = LocalContext.current
     val repository = remember(ownerId, database) { LedgerRepository(ownerId, database) }
     val importRepository = remember(ownerId, database) { ImportRepository(ownerId, database, context) }
@@ -122,7 +122,11 @@ fun FinanceApp(ownerId: String, database: VaultDatabase) {
                     catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save import") }
                 } }, modifier = Modifier.padding(padding))
             Tab.Wealth -> WealthContent(balances, Modifier.padding(padding))
-            Tab.Settings -> PlainContent("Settings", "This local development vault has no cloud backup. Google sign-in and Drive consent will be configured with the app's OAuth credentials.", Modifier.padding(padding))
+            Tab.Settings -> Column(Modifier.padding(padding).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Settings", style = MaterialTheme.typography.headlineMedium)
+                Text("Cloud backup is not configured in this build. Records currently remain on this phone.")
+                Button(onClick = onSignOut) { Text("Lock and sign out") }
+            }
         }
     }
 
