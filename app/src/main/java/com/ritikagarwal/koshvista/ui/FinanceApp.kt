@@ -86,6 +86,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var editor by remember { mutableStateOf<Editor?>(null) }
     var addMenu by remember { mutableStateOf(false) }
     var selectedAccount by remember { mutableStateOf<AccountBalance?>(null) }
+    var selectedTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
     var importAccountId by remember { mutableStateOf("") }
     var selectedImportId by remember { mutableStateOf<String?>(null) }
     var activityDay by remember { mutableStateOf<String?>(null) }
@@ -135,6 +136,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 onCategory = { activityCategory = it; activityDay = null; categoryFilterActive = true; tab = Tab.Activity },
                 Modifier.padding(padding))
             Tab.Activity -> ActivityContent(visibleTransactions, accounts, { editor = Editor.Expense },
+                onSelect = { selectedTransaction = it },
                 filterLabel = activityDay ?: if (categoryFilterActive) activityCategory?.let { id -> categories.find { it.id == id }?.name } ?: "Uncategorised" else null,
                 onClearFilter = { activityDay = null; activityCategory = null; categoryFilterActive = false },
                 Modifier.padding(padding))
@@ -166,6 +168,21 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
         text = { Column { Text(formatMoney(account.balanceMinor, account.currencyCode), style = MaterialTheme.typography.headlineMedium)
             Text("Balance from opening amount and posted entries") } },
         confirmButton = { TextButton(onClick = { selectedAccount = null }) { Text("Close") } }) }
+
+    selectedTransaction?.let { transaction -> AlertDialog(onDismissRequest = { selectedTransaction = null },
+        title = { Text(transaction.description) },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(formatMoney(transaction.amountMinor, transaction.currencyCode), style = MaterialTheme.typography.headlineMedium)
+            Text("${transaction.localDate} · ${accounts.find { it.id == transaction.accountId }?.name ?: "Account"}")
+            Text("Type: ${transaction.kind.replace('_', ' ')}")
+            if (transaction.sourceDocumentId != null) Text("Imported from a statement; original source is retained.")
+            if (transaction.transferGroupId != null) Text("Both sides of this transfer will be reversed together.")
+        } },
+        confirmButton = { Button(onClick = { scope.launch {
+            try { repository.voidTransaction(transaction.id); selectedTransaction = null; snackbar.showSnackbar("Record reversed") }
+            catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not reverse record") }
+        } }) { Text("Reverse entry") } },
+        dismissButton = { TextButton(onClick = { selectedTransaction = null }) { Text("Close") } }) }
 
     editor?.let { current -> when (current) {
         Editor.FixedDeposit -> FixedDepositEditor(accounts, { editor = null }) { source, name, institution, principal, rate, maturity -> scope.launch {
@@ -244,6 +261,7 @@ private fun HomeContent(
 
 @Composable
 private fun ActivityContent(transactions: List<TransactionEntity>, accounts: List<AccountEntity>, onAdd: () -> Unit,
+    onSelect: (TransactionEntity) -> Unit,
     filterLabel: String?, onClearFilter: () -> Unit, modifier: Modifier) {
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Text("Activity", style = MaterialTheme.typography.headlineMedium) }
@@ -255,7 +273,7 @@ private fun ActivityContent(transactions: List<TransactionEntity>, accounts: Lis
             Text("No transactions yet. Add an expense or income to begin your ledger.")
             Button(onClick = onAdd) { Text("Add expense") }
         } }
-        items(transactions, key = { it.id }) { transaction -> Card(Modifier.fillMaxWidth()) {
+        items(transactions, key = { it.id }) { transaction -> Card(Modifier.fillMaxWidth().clickable { onSelect(transaction) }) {
             Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     Text(transaction.description, fontWeight = FontWeight.SemiBold)

@@ -18,6 +18,32 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun reversingTransferVoidsBothSidesAndProtectsDeposits() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 1, 1)
+                repo.initialiseOwner("Tester")
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(100_000, "INR"), day)
+                val cash = repo.addAccount("cash", "Cash", "INR", Money(0, "INR"), day)
+                val group = repo.transfer(bank, cash, Money(5_000, "INR"), day)
+                repo.voidTransaction(database.vaultDao().transferEntries(owner, group).first().id)
+                assertEquals(listOf("void", "void"), database.vaultDao().transferEntries(owner, group).map { it.status })
+                assertEquals(100_000L, repo.balances.first().sumOf { it.balanceMinor })
+                assertEquals(0L, repo.balances.first().single { it.id == cash }.balanceMinor)
+
+                repo.createFixedDeposit(bank, "FD", "Bank", Money(20_000, "INR"), BigDecimal("0.05"), day, day.plusYears(1))
+                val funding = repo.recentTransactions.first().first { it.description.startsWith("Fixed deposit funding") }
+                assertTrue(runCatching { repo.voidTransaction(funding.id) }.isFailure)
+                assertEquals(100_000L, repo.balances.first().sumOf { it.balanceMinor })
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun fixedDepositFundingIsAtomicAndDoesNotInflateNetWorth() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

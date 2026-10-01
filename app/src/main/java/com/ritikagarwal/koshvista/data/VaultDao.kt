@@ -96,4 +96,6 @@ interface VaultDao {
     @Insert suspend fun insertFixedDeposit(contract: FixedDepositEntity)
     @Query("SELECT * FROM fixed_deposits WHERE ownerId = :ownerId AND status = 'active' ORDER BY maturityLocalDate")
     fun fixedDeposits(ownerId: String): Flow<List<FixedDepositEntity>>
+    @Query("SELECT COUNT(*) FROM fixed_deposits WHERE ownerId = :ownerId AND assetAccountId = :accountId AND status = 'active'")
+    suspend fun activeDepositCountForAccount(ownerId: String, accountId: String): Int
 }

@@ -144,4 +144,18 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         check(dao.transferEntries(ownerId, group).sumOf { it.amountMinor } == 0L)
         id
     }
+
+    /** Retains the source record and atomically voids both sides of a transfer. */
+    suspend fun voidTransaction(transactionId: String) = database.withTransaction {
+        val original = dao.transaction(ownerId, transactionId) ?: error("Transaction unavailable")
+        require(original.status == "posted") { "Transaction is already void" }
+        val entries = original.transferGroupId?.let { dao.transferEntries(ownerId, it) } ?: listOf(original)
+        require(entries.isNotEmpty() && entries.all { it.status == "posted" })
+        if (original.transferGroupId != null) require(entries.size == 2 && entries.sumOf { it.amountMinor } == 0L)
+        require(entries.none { dao.activeDepositCountForAccount(ownerId, it.accountId) > 0 }) {
+            "An active fixed deposit uses this funding transfer"
+        }
+        val now = System.currentTimeMillis()
+        entries.forEach { dao.updateTransaction(it.copy(status = "void", updatedAtMs = now)) }
+    }
 }
