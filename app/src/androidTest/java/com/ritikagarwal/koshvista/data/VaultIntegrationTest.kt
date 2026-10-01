@@ -14,11 +14,33 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun deletingLocalVaultRemovesEncryptedSourceFiles() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        val database = factory.open(owner)
+        try {
+            val repo = LedgerRepository(owner, database)
+            repo.initialiseOwner("Tester")
+            val bank = repo.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.of(2026, 1, 1))
+            ImportRepository(owner, database, context).stageCsv(bank, "sample.csv",
+                "Date,Description,Debit,Credit\n2026-10-01,Cafe,12.50,\n".toByteArray())
+        } finally { database.close() }
+        val handle = java.security.MessageDigest.getInstance("SHA-256").digest(owner.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        val directory = java.io.File(context.filesDir, "sources/$handle")
+        assertTrue(directory.exists())
+        factory.delete(owner)
+        assertFalse(directory.exists())
+        assertFalse(context.getDatabasePath("vault-$handle.db").exists())
+    }
+
     @Test fun reconciliationRequiresExplicitAdjustmentAndRejectsStaleComparison() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

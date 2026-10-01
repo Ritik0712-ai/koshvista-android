@@ -3,6 +3,7 @@ package com.ritikagarwal.koshvista.data
 import android.content.Context
 import androidx.room.Room
 import com.ritikagarwal.koshvista.security.VaultKeys
+import com.ritikagarwal.koshvista.security.DocumentStore
 import java.security.MessageDigest
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
@@ -23,6 +24,7 @@ class VaultFactory(private val context: Context) {
     fun delete(ownerId: String) {
         val handle = MessageDigest.getInstance("SHA-256").digest(ownerId.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
+        DocumentStore(context).deleteAll(ownerId)
         context.deleteDatabase("vault-$handle.db")
         keys.delete(ownerId)
     }

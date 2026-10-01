@@ -52,6 +52,11 @@ class DocumentStore(private val context: Context) {
         File(ownerDirectory(ownerId), fileName).delete()
     }
 
+    fun deleteAll(ownerId: String) {
+        val directory = ownerDirectory(ownerId)
+        check(!directory.exists() || directory.deleteRecursively()) { "Could not remove encrypted source files" }
+    }
+
     private fun documentKey(ownerId: String): ByteArray {
         val vaultKey = vaultKeys.getOrCreate(ownerId)
         return try {

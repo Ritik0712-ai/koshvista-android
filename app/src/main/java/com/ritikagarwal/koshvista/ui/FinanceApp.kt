@@ -71,7 +71,7 @@ private enum class Tab { Home, Activity, Import, Wealth, Settings }
 private enum class Editor { Account, Expense, Income, CashExpense, Transfer, FixedDeposit, Budget, Trade }
 
 @Composable
-fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) {
+fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit, onDeleteLocal: () -> Unit) {
     val context = LocalContext.current
     val repository = remember(ownerId, database) { LedgerRepository(ownerId, database) }
     val importRepository = remember(ownerId, database) { ImportRepository(ownerId, database, context) }
@@ -110,6 +110,8 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var backupAction by remember { mutableStateOf<String?>(null) }
     var recoveryPassphrase by remember { mutableStateOf("") }
     var documentPreview by remember { mutableStateOf<String?>(null) }
+    var confirmingDelete by remember { mutableStateOf(false) }
+    var deletePhrase by remember { mutableStateOf("") }
     val filteredActivity = remember(repository, activityDay, activityCategory, categoryFilterActive,
         activityAccountId, activitySearch, activityPage) {
         database.vaultDao().searchTransactions(ownerId, activityAccountId, activityDay, categoryFilterActive,
@@ -226,6 +228,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 Button(onClick = { backupAction = "create" }) { Text("Create local backup") }
                 Button(onClick = { backupAction = "restore" }) { Text("Restore from backup file") }
                 Button(onClick = onSignOut) { Text("Lock and sign out") }
+                TextButton(onClick = { confirmingDelete = true }) { Text("Delete local vault") }
             }
         }
     }
@@ -254,6 +257,16 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             backupAction = null
         }, enabled = recoveryPassphrase.length >= 12) { Text(if (action == "create") "Choose save location" else "Choose backup file") } },
         dismissButton = { TextButton(onClick = { backupAction = null; recoveryPassphrase = "" }) { Text("Cancel") } }) }
+
+    if (confirmingDelete) AlertDialog(onDismissRequest = { confirmingDelete = false; deletePhrase = "" },
+        title = { Text("Delete local vault?") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("This removes this owner's encrypted database, local source files, and device key. It cannot be undone without a separate backup. Drive files, if any, are a separate deletion.")
+            OutlinedTextField(deletePhrase, { deletePhrase = it }, label = { Text("Type DELETE to confirm") })
+        } },
+        confirmButton = { Button(onClick = { confirmingDelete = false; deletePhrase = ""; onDeleteLocal() },
+            enabled = deletePhrase == "DELETE") { Text("Delete local data") } },
+        dismissButton = { TextButton(onClick = { confirmingDelete = false; deletePhrase = "" }) { Text("Cancel") } })
 
     selectedTransaction?.let { transaction -> AlertDialog(onDismissRequest = { selectedTransaction = null },
         title = { Text(transaction.description) },

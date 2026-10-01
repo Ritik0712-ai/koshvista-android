@@ -28,6 +28,8 @@ import com.ritikagarwal.koshvista.identity.GoogleAuthGateway
 import com.ritikagarwal.koshvista.ui.FinanceApp
 import com.ritikagarwal.koshvista.ui.KoshVistaTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,12 +45,24 @@ private fun AppEntry() {
     var database by remember { mutableStateOf<VaultDatabase?>(null) }
     var ownerId by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var deleting by remember { mutableStateOf(false) }
     val active = database
     DisposableEffect(active) { onDispose { active?.close() } }
     if (active != null) {
         FinanceApp(checkNotNull(ownerId), active, onSignOut = {
             database = null
             ownerId = null
+        }, onDeleteLocal = {
+            val toDelete = checkNotNull(ownerId)
+            active.close()
+            deleting = true
+            database = null
+            ownerId = null
+            scope.launch {
+                try { withContext(Dispatchers.IO) { VaultFactory(context).delete(toDelete) }; error = null }
+                catch (failure: Exception) { error = failure.message ?: "Could not delete local vault" }
+                finally { deleting = false }
+            }
         })
     } else Surface(Modifier.fillMaxSize()) {
         Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.Center) {
@@ -56,7 +70,8 @@ private fun AppEntry() {
             Text("A clearer view of your money", style = MaterialTheme.typography.bodyLarge)
             Text("Financial records stay on this phone. Google sign-in and encrypted Drive recovery require the app's OAuth configuration.",
                 modifier = Modifier.padding(top = 16.dp, bottom = 24.dp))
-            if (BuildConfig.GOOGLE_WEB_CLIENT_ID.isNotBlank()) Button(onClick = {
+            if (deleting) Text("Deleting this device's vault…")
+            if (!deleting && BuildConfig.GOOGLE_WEB_CLIENT_ID.isNotBlank()) Button(onClick = {
                 scope.launch {
                     try {
                         val signedIn = GoogleAuthGateway().signIn(context as Activity, BuildConfig.GOOGLE_WEB_CLIENT_ID)
@@ -66,7 +81,7 @@ private fun AppEntry() {
                     } catch (failure: Exception) { error = failure.message ?: "Google sign-in failed" }
                 }
             }) { Text("Continue with Google") }
-            if (BuildConfig.DEBUG) Button(onClick = {
+            if (!deleting && BuildConfig.DEBUG) Button(onClick = {
                 ownerId = "debug-local"
                 database = VaultFactory(context).open("debug-local")
             }) {
