@@ -1,5 +1,8 @@
 package com.ritikagarwal.koshvista.ui
 
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -33,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ritikagarwal.koshvista.core.EntryKind
@@ -40,25 +44,33 @@ import com.ritikagarwal.koshvista.core.Money
 import com.ritikagarwal.koshvista.data.AccountBalance
 import com.ritikagarwal.koshvista.data.AccountEntity
 import com.ritikagarwal.koshvista.data.LedgerRepository
+import com.ritikagarwal.koshvista.data.ImportJobEntity
+import com.ritikagarwal.koshvista.data.ImportCandidateEntity
 import com.ritikagarwal.koshvista.data.TransactionEntity
 import com.ritikagarwal.koshvista.data.VaultDatabase
+import com.ritikagarwal.koshvista.imports.ImportRepository
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.util.Currency
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class Tab { Home, Activity, Import, Wealth, Settings }
 private enum class Editor { Account, Expense, Income, CashExpense, Transfer }
 
 @Composable
 fun FinanceApp(ownerId: String, database: VaultDatabase) {
+    val context = LocalContext.current
     val repository = remember(ownerId, database) { LedgerRepository(ownerId, database) }
+    val importRepository = remember(ownerId, database) { ImportRepository(ownerId, database, context) }
     val accounts by repository.accounts.collectAsState(emptyList())
     val balances by repository.balances.collectAsState(emptyList())
     val transactions by repository.recentTransactions.collectAsState(emptyList())
     val categories by repository.categories.collectAsState(emptyList())
+    val importJobs by importRepository.history.collectAsState(emptyList())
     val monthStart = remember { LocalDate.now().withDayOfMonth(1).toString() }
     val today = remember { LocalDate.now().toString() }
     val income by remember(repository) { database.vaultDao().totalForKind(ownerId, "income", monthStart, today) }.collectAsState(0L)
@@ -69,6 +81,23 @@ fun FinanceApp(ownerId: String, database: VaultDatabase) {
     var editor by remember { mutableStateOf<Editor?>(null) }
     var addMenu by remember { mutableStateOf(false) }
     var selectedAccount by remember { mutableStateOf<AccountBalance?>(null) }
+    var importAccountId by remember { mutableStateOf("") }
+    var selectedImportId by remember { mutableStateOf<String?>(null) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            try {
+                val name = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                    if (it.moveToFirst()) it.getString(0) else null
+                } ?: "Statement.csv"
+                val bytes = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { it.readNBytes(20 * 1024 * 1024 + 1) }
+                        ?: error("Could not open the selected file")
+                }
+                selectedImportId = importRepository.stageCsv(importAccountId, name, bytes)
+                snackbar.showSnackbar("Review the statement before saving")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not analyse the file") }
+        }
+    }
 
     LaunchedEffect(repository) { repository.initialiseOwner(null) }
 
@@ -86,7 +115,12 @@ fun FinanceApp(ownerId: String, database: VaultDatabase) {
                 onAccount = { selectedAccount = it }, onAccountAdd = { editor = Editor.Account },
                 onCashSpend = { editor = Editor.CashExpense }, Modifier.padding(padding))
             Tab.Activity -> ActivityContent(transactions, accounts, { editor = Editor.Expense }, Modifier.padding(padding))
-            Tab.Import -> PlainContent("Import", "Document import is not yet available in this development build.", Modifier.padding(padding))
+            Tab.Import -> ImportContent(accounts, importJobs, importAccountId, selectedImportId, importRepository,
+                onAccount = { importAccountId = it }, onPick = { filePicker.launch(arrayOf("text/*", "application/csv")) },
+                onSelectJob = { selectedImportId = it }, onCommit = { id -> scope.launch {
+                    try { val count = importRepository.commit(id); snackbar.showSnackbar("Saved $count transactions on this phone") }
+                    catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save import") }
+                } }, modifier = Modifier.padding(padding))
             Tab.Wealth -> WealthContent(balances, Modifier.padding(padding))
             Tab.Settings -> PlainContent("Settings", "This local development vault has no cloud backup. Google sign-in and Drive consent will be configured with the app's OAuth credentials.", Modifier.padding(padding))
         }
@@ -186,6 +220,70 @@ private fun ActivityContent(transactions: List<TransactionEntity>, accounts: Lis
                 Text(formatMoney(transaction.amountMinor, transaction.currencyCode))
             }
         } }
+    }
+}
+
+@Composable
+private fun ImportContent(
+    accounts: List<AccountEntity>, jobs: List<ImportJobEntity>, accountId: String,
+    selectedJobId: String?, repository: ImportRepository,
+    onAccount: (String) -> Unit, onPick: () -> Unit, onSelectJob: (String?) -> Unit,
+    onCommit: (String) -> Unit, modifier: Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var message by remember { mutableStateOf<String?>(null) }
+    val selectedJob = jobs.find { it.id == selectedJobId }
+    val candidateFlow = remember(repository, selectedJobId) { selectedJobId?.let(repository::candidates) }
+    val candidates by candidateFlow?.collectAsState(emptyList()) ?: remember { mutableStateOf(emptyList()) }
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { Text("Import", style = MaterialTheme.typography.headlineMedium) }
+        if (selectedJob == null) {
+            item { Text("Choose the account for a bank CSV statement. You'll review every uncertain row before it enters your ledger.") }
+            if (accounts.isEmpty()) item { Text("Add a bank account on Home before importing a statement.") }
+            items(accounts.filter { it.type == "bank" || it.type == "credit_card" }) { account ->
+                FilterChip(selected = accountId == account.id, onClick = { onAccount(account.id) }, label = { Text(account.name) })
+            }
+            item { Button(onClick = onPick, enabled = accountId.isNotBlank()) { Text("Choose CSV statement") } }
+            item { Text("Import history", style = MaterialTheme.typography.titleLarge) }
+            if (jobs.isEmpty()) item { Text("No statements imported yet.") }
+            items(jobs, key = { it.id }) { job -> Card(Modifier.fillMaxWidth().clickable { onSelectJob(job.id) }) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Statement · ${job.status}", fontWeight = FontWeight.SemiBold)
+                    Text("${job.acceptedCount} saved · ${job.duplicateCount} duplicates")
+                }
+            } }
+        } else {
+            item { Text("Review statement", style = MaterialTheme.typography.titleLarge) }
+            item { Text("${candidates.count { it.decision == "accepted" }} ready · ${candidates.count { it.decision == "unreviewed" }} need a decision · ${candidates.count { it.decision == "duplicate" }} duplicates") }
+            if (selectedJob.status == "completed") item { Text("Saved ${selectedJob.acceptedCount} transactions on this phone.") }
+            items(candidates, key = { it.id }) { candidate -> Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(candidate.description.ifBlank { "Row ${candidate.sourceRow}" }, fontWeight = FontWeight.SemiBold)
+                    Text("Row ${candidate.sourceRow} · ${candidate.localDate ?: "Date missing"} · ${candidate.amountMinor?.let { formatMoney(it, candidate.currencyCode) } ?: "Amount missing"}")
+                    Text(candidate.reviewReasons.ifBlank { "Ready" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Decision: ${candidate.decision}")
+                    if (selectedJob.status == "review") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (candidate.localDate != null && candidate.amountMinor != null && candidate.amountMinor != 0L && candidate.description.isNotBlank()) {
+                            TextButton(onClick = { scope.launch {
+                                try { repository.decide(candidate.id, "accepted") } catch (error: Exception) { message = error.message }
+                            } }) { Text("Accept") }
+                        }
+                        TextButton(onClick = { scope.launch {
+                            try { repository.decide(candidate.id, "rejected") } catch (error: Exception) { message = error.message }
+                        } }) { Text("Reject") }
+                        TextButton(onClick = { scope.launch {
+                            try { repository.decide(candidate.id, "duplicate") } catch (error: Exception) { message = error.message }
+                        } }) { Text("Duplicate") }
+                    }
+                }
+            } }
+            if (message != null) item { Text(message.orEmpty(), color = MaterialTheme.colorScheme.error) }
+            if (selectedJob.status == "review") item { Button(onClick = { onCommit(selectedJob.id) },
+                enabled = candidates.isNotEmpty() && candidates.none { it.decision == "unreviewed" }) {
+                Text("Save ${candidates.count { it.decision == "accepted" }} transactions")
+            } }
+            item { TextButton(onClick = { onSelectJob(null) }) { Text("Back to imports") } }
+        }
     }
 }
 

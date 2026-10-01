@@ -3,6 +3,8 @@ package com.ritikagarwal.koshvista.data
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ritikagarwal.koshvista.core.Money
+import com.ritikagarwal.koshvista.imports.ImportRepository
+import com.ritikagarwal.koshvista.security.DocumentStore
 import java.time.LocalDate
 import java.util.UUID
 import kotlinx.coroutines.flow.first
@@ -47,6 +49,38 @@ class VaultIntegrationTest {
         } finally {
             factory.delete(alice)
             factory.delete(bob)
+        }
+    }
+
+    @Test fun csvReviewAndCommitAreAtomicAndRepeatable() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        var sourceRef: String? = null
+        try {
+            val database = factory.open(owner)
+            try {
+                val ledger = LedgerRepository(owner, database)
+                ledger.initialiseOwner("Tester")
+                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.now())
+                val importer = ImportRepository(owner, database, context)
+                val csv = "Date,Description,Debit,Credit\n2026-09-30,Cafe,12.50,\n03/04/2026,Salary,,300.00\n".toByteArray()
+                val jobId = importer.stageCsv(bank, "sample.csv", csv)
+                val rows = importer.candidates(jobId).first()
+                assertEquals(2, rows.size)
+                assertTrue(runCatching { importer.commit(jobId) }.isFailure)
+                assertTrue(ledger.recentTransactions.first().isEmpty())
+                importer.decide(rows.single { it.decision == "unreviewed" }.id, "accepted")
+                assertEquals(2, importer.commit(jobId))
+                assertEquals(2, ledger.recentTransactions.first().size)
+                assertEquals(jobId, importer.stageCsv(bank, "sample.csv", csv))
+                assertEquals(2, importer.commit(jobId))
+                sourceRef = database.importDao().document(owner, database.importDao().job(owner, jobId)!!.documentId)!!.encryptedFileRef
+                assertEquals(String(csv), String(DocumentStore(context).read(owner, sourceRef!!)))
+            } finally { database.close() }
+        } finally {
+            sourceRef?.let { DocumentStore(context).delete(owner, it) }
+            factory.delete(owner)
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.ritikagarwal.koshvista.data
 
 import androidx.room.Database
+import androidx.room.AutoMigration
 import androidx.room.RoomDatabase
 
 @Database(
@@ -10,10 +11,15 @@ import androidx.room.RoomDatabase
         CategoryEntity::class,
         TransactionEntity::class,
         TransactionSplitEntity::class,
+        SourceDocumentEntity::class,
+        ImportJobEntity::class,
+        ImportCandidateEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
+    autoMigrations = [AutoMigration(from = 1, to = 2)],
 )
 abstract class VaultDatabase : RoomDatabase() {
     abstract fun vaultDao(): VaultDao
+    abstract fun importDao(): ImportDao
 }
