@@ -19,6 +19,37 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun investmentBuyAndSellKeepCostBasisAndCashReconciled() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 10, 1)
+                repo.initialiseOwner("Tester")
+                val broker = repo.addAccount("broker_cash", "Broker", "INR", Money(100_000, "INR"), day)
+                repo.recordTrade(broker, "ABC", "ABC Ltd", "buy", BigDecimal("10"), BigDecimal("20"),
+                    Money(100, "INR"), day)
+                assertEquals(10, repo.positions.first().single().quantity.toInt())
+                assertEquals(20_000L, repo.positions.first().single().costBasisMinor)
+                assertEquals(79_900L, repo.balances.first().single { it.id == broker }.balanceMinor)
+                val sellId = repo.recordTrade(broker, "ABC", "ABC Ltd", "sell", BigDecimal("4"), BigDecimal("25"),
+                    Money(50, "INR"), day.plusDays(1))
+                assertEquals(6, repo.positions.first().single().quantity.toInt())
+                assertEquals(12_000L, repo.positions.first().single().costBasisMinor)
+                assertEquals(89_850L, repo.balances.first().single { it.id == broker }.balanceMinor)
+                assertEquals(101_850L, repo.balances.first().sumOf { it.balanceMinor })
+                assertEquals(2_000L, repo.investmentTrades.first().single { it.id == sellId }.realisedGainMinor)
+                val linked = repo.recentTransactions.first().first { it.tradeId == sellId }
+                assertTrue(runCatching { repo.voidTransaction(linked.id) }.isFailure)
+                assertTrue(runCatching { repo.recordTrade(broker, "ABC", "ABC Ltd", "sell", BigDecimal("7"),
+                    BigDecimal("25"), Money(0, "INR"), day.plusDays(2)) }.isFailure)
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun encryptedLocalBackupRestoresLedgerAndSourceOnNewVaultKey() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)

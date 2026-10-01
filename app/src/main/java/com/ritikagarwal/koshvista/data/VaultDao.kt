@@ -107,4 +107,19 @@ interface VaultDao {
     fun budgets(ownerId: String): Flow<List<BudgetEntity>>
     @Query("SELECT * FROM categories WHERE ownerId = :ownerId AND id = :id")
     suspend fun category(ownerId: String, id: String): CategoryEntity?
+
+    @Insert suspend fun insertInstrument(instrument: InstrumentEntity)
+    @Query("SELECT * FROM instruments WHERE ownerId = :ownerId ORDER BY name")
+    fun instruments(ownerId: String): Flow<List<InstrumentEntity>>
+    @Query("SELECT * FROM instruments WHERE ownerId = :ownerId AND id = :id")
+    suspend fun instrument(ownerId: String, id: String): InstrumentEntity?
+    @Query("SELECT * FROM instruments WHERE ownerId = :ownerId AND symbol = :symbol")
+    suspend fun instrumentBySymbol(ownerId: String, symbol: String): InstrumentEntity?
+    @Insert suspend fun insertTrade(trade: InvestmentTradeEntity)
+    @Query("SELECT * FROM investment_trades WHERE ownerId = :ownerId ORDER BY tradeLocalDate, createdAtMs")
+    fun investmentTrades(ownerId: String): Flow<List<InvestmentTradeEntity>>
+    @Query("SELECT * FROM investment_trades WHERE ownerId = :ownerId AND instrumentId = :instrumentId ORDER BY tradeLocalDate, createdAtMs")
+    suspend fun instrumentTrades(ownerId: String, instrumentId: String): List<InvestmentTradeEntity>
+    @Query("SELECT COUNT(*) FROM instruments WHERE ownerId = :ownerId AND assetAccountId = :accountId")
+    suspend fun instrumentCountForAccount(ownerId: String, accountId: String): Int
 }

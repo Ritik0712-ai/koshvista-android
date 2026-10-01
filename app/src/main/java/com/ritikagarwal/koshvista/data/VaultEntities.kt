@@ -78,6 +78,7 @@ data class TransactionEntity(
     val transferGroupId: String? = null,
     val sourceDocumentId: String? = null,
     val sourceFingerprint: String? = null,
+    val tradeId: String? = null,
     val refundOfTransactionId: String? = null,
     val note: String? = null,
     val createdAtMs: Long,

@@ -4,10 +4,15 @@ import androidx.room.withTransaction
 import com.ritikagarwal.koshvista.core.EntryKind
 import com.ritikagarwal.koshvista.core.LedgerMath
 import com.ritikagarwal.koshvista.core.Money
+import com.ritikagarwal.koshvista.core.Position
+import com.ritikagarwal.koshvista.core.PositionMath
 import java.time.LocalDate
 import java.math.BigDecimal
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+
+data class PositionSummary(val instrument: InstrumentEntity, val quantity: BigDecimal, val costBasisMinor: Long)
 
 /** The only write path for posted account and ledger records. */
 class LedgerRepository(private val ownerId: String, private val database: VaultDatabase) {
@@ -19,6 +24,18 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
     val recentTransactions: Flow<List<TransactionEntity>> = dao.transactions(ownerId, 100, 0)
     val fixedDeposits: Flow<List<FixedDepositEntity>> = dao.fixedDeposits(ownerId)
     val budgets: Flow<List<BudgetEntity>> = dao.budgets(ownerId)
+    val instruments: Flow<List<InstrumentEntity>> = dao.instruments(ownerId)
+    val investmentTrades: Flow<List<InvestmentTradeEntity>> = dao.investmentTrades(ownerId)
+    val positions: Flow<List<PositionSummary>> = combine(instruments, investmentTrades) { allInstruments, trades ->
+        allInstruments.map { instrument ->
+            val held = trades.filter { it.instrumentId == instrument.id }.fold(Position(BigDecimal.ZERO, 0L)) { position, trade ->
+                val units = trade.quantityDecimal.toBigDecimal()
+                if (trade.side == "buy") Position(position.quantity + units, Math.addExact(position.costBasisMinor, trade.grossMinor))
+                else Position(position.quantity - units, Math.subtractExact(position.costBasisMinor, trade.costBasisMinor))
+            }
+            PositionSummary(instrument, held.quantity, held.costBasisMinor)
+        }.filter { it.quantity > BigDecimal.ZERO }
+    }
 
     suspend fun initialiseOwner(displayName: String?) = database.withTransaction {
         if (dao.owner(ownerId) == null) {
@@ -150,8 +167,9 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
     suspend fun voidTransaction(transactionId: String) = database.withTransaction {
         val original = dao.transaction(ownerId, transactionId) ?: error("Transaction unavailable")
         require(original.status == "posted") { "Transaction is already void" }
+        require(original.tradeId == null) { "Investment trades must be adjusted through the trade ledger" }
         val entries = original.transferGroupId?.let { dao.transferEntries(ownerId, it) } ?: listOf(original)
-        require(entries.isNotEmpty() && entries.all { it.status == "posted" })
+        require(entries.isNotEmpty() && entries.all { it.status == "posted" && it.tradeId == null })
         if (original.transferGroupId != null) require(entries.size == 2 && entries.sumOf { it.amountMinor } == 0L)
         require(entries.none { dao.activeDepositCountForAccount(ownerId, it.accountId) > 0 }) {
             "An active fixed deposit uses this funding transfer"
@@ -169,5 +187,64 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         if (existing == null) dao.insertBudget(BudgetEntity(ownerId, UUID.randomUUID().toString(),
             categoryId, limit.minor, limit.currencyCode, createdAtMs = now, updatedAtMs = now))
         else dao.updateBudget(existing.copy(limitMinor = limit.minor, status = "active", updatedAtMs = now))
+    }
+
+    /** Trade entries, funding transfer and fees are committed together. */
+    suspend fun recordTrade(brokerAccountId: String, symbol: String, name: String, side: String,
+        quantity: BigDecimal, unitPrice: BigDecimal, fees: Money, date: LocalDate): String = database.withTransaction {
+        require(side in setOf("buy", "sell"))
+        require(symbol.isNotBlank() && name.isNotBlank())
+        require(quantity > BigDecimal.ZERO && unitPrice > BigDecimal.ZERO)
+        require(fees.minor >= 0)
+        val broker = dao.account(ownerId, brokerAccountId) ?: error("Broker cash account unavailable")
+        require(broker.status == "active" && broker.type == "broker_cash")
+        require(broker.currencyCode == fees.currencyCode)
+        val normalizedSymbol = symbol.trim().uppercase()
+        val gross = PositionMath.grossMinor(quantity, unitPrice, fees.currencyCode)
+        val now = System.currentTimeMillis()
+        var instrument = dao.instrumentBySymbol(ownerId, normalizedSymbol)
+        if (instrument == null) {
+            require(side == "buy") { "Buy an instrument before selling it" }
+            val assetId = UUID.randomUUID().toString()
+            dao.insertAccount(AccountEntity(ownerId, assetId, "asset", name.trim(), broker.institutionName,
+                broker.currencyCode, 0, date.toString(), createdAtMs = now, updatedAtMs = now))
+            instrument = InstrumentEntity(ownerId, UUID.randomUUID().toString(), name.trim(), normalizedSymbol,
+                assetId, broker.currencyCode, now, now)
+            dao.insertInstrument(instrument)
+        }
+        require(instrument.currencyCode == broker.currencyCode)
+        val previous = dao.instrumentTrades(ownerId, instrument.id)
+        require(previous.isEmpty() || date.toString() >= previous.last().tradeLocalDate) {
+            "Add trades in date order so cost basis stays correct"
+        }
+        val held = previous.fold(Position(BigDecimal.ZERO, 0L)) { position, trade ->
+            val units = trade.quantityDecimal.toBigDecimal()
+            if (trade.side == "buy") Position(position.quantity + units, Math.addExact(position.costBasisMinor, trade.grossMinor))
+            else Position(position.quantity - units, Math.subtractExact(position.costBasisMinor, trade.costBasisMinor))
+        }
+        val costBasis = if (side == "sell") PositionMath.soldCostBasis(held, quantity) else gross
+        val realisedGain = if (side == "sell") Math.subtractExact(gross, costBasis) else 0L
+        val tradeId = UUID.randomUUID().toString()
+        val group = UUID.randomUUID().toString()
+        val funding = if (side == "buy") LedgerMath.transfer(brokerAccountId, instrument.assetAccountId,
+            Money(gross, broker.currencyCode), date)
+        else LedgerMath.transfer(instrument.assetAccountId, brokerAccountId, Money(costBasis, broker.currencyCode), date)
+        listOf(funding.first, funding.second).forEach { entry ->
+            dao.insertTransaction(TransactionEntity(ownerId, UUID.randomUUID().toString(), entry.accountId,
+                date.toString(), "${side.replaceFirstChar { it.uppercase() }} $normalizedSymbol", null,
+                entry.amount.minor, broker.currencyCode, "transfer", transferGroupId = group,
+                tradeId = tradeId, createdAtMs = now, updatedAtMs = now))
+        }
+        if (realisedGain != 0L) dao.insertTransaction(TransactionEntity(ownerId, UUID.randomUUID().toString(),
+            brokerAccountId, date.toString(), "Realised gain/loss $normalizedSymbol", null, realisedGain,
+            broker.currencyCode, "trade_cash", tradeId = tradeId, createdAtMs = now, updatedAtMs = now))
+        if (fees.minor > 0) dao.insertTransaction(TransactionEntity(ownerId, UUID.randomUUID().toString(),
+            brokerAccountId, date.toString(), "Trade fee $normalizedSymbol", null, -fees.minor,
+            broker.currencyCode, "fee", tradeId = tradeId, createdAtMs = now, updatedAtMs = now))
+        dao.insertTrade(InvestmentTradeEntity(ownerId, tradeId, instrument.id, brokerAccountId, side,
+            date.toString(), quantity.stripTrailingZeros().toPlainString(), unitPrice.stripTrailingZeros().toPlainString(),
+            fees.minor, gross, costBasis, realisedGain, broker.currencyCode, now, now))
+        check(dao.transferEntries(ownerId, group).sumOf { it.amountMinor } == 0L)
+        tradeId
     }
 }

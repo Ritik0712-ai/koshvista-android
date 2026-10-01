@@ -53,6 +53,7 @@ import com.ritikagarwal.koshvista.data.ImportCandidateEntity
 import com.ritikagarwal.koshvista.data.TransactionEntity
 import com.ritikagarwal.koshvista.data.FixedDepositEntity
 import com.ritikagarwal.koshvista.data.BudgetEntity
+import com.ritikagarwal.koshvista.data.PositionSummary
 import com.ritikagarwal.koshvista.data.VaultDatabase
 import com.ritikagarwal.koshvista.imports.ImportRepository
 import java.math.BigDecimal
@@ -65,7 +66,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class Tab { Home, Activity, Import, Wealth, Settings }
-private enum class Editor { Account, Expense, Income, CashExpense, Transfer, FixedDeposit, Budget }
+private enum class Editor { Account, Expense, Income, CashExpense, Transfer, FixedDeposit, Budget, Trade }
 
 @Composable
 fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) {
@@ -79,6 +80,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val importJobs by importRepository.history.collectAsState(emptyList())
     val fixedDeposits by repository.fixedDeposits.collectAsState(emptyList())
     val budgets by repository.budgets.collectAsState(emptyList())
+    val positions by repository.positions.collectAsState(emptyList())
     val monthStart = remember { LocalDate.now().withDayOfMonth(1).toString() }
     val today = remember { LocalDate.now().toString() }
     val lastSevenStart = remember { LocalDate.now().minusDays(6).toString() }
@@ -181,7 +183,8 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                     try { val count = importRepository.commit(id); snackbar.showSnackbar("Saved $count transactions on this phone") }
                     catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save import") }
                 } }, modifier = Modifier.padding(padding))
-            Tab.Wealth -> WealthContent(balances, fixedDeposits, { editor = Editor.FixedDeposit }, Modifier.padding(padding))
+            Tab.Wealth -> WealthContent(balances, fixedDeposits, positions,
+                { editor = Editor.FixedDeposit }, { editor = Editor.Trade }, Modifier.padding(padding))
             Tab.Settings -> Column(Modifier.padding(padding).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Settings", style = MaterialTheme.typography.headlineMedium)
                 Text("Create an encrypted backup file and keep its passphrase separately. Google Drive sync will be available after cloud access is configured.")
@@ -198,6 +201,7 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             Editor.CashExpense to "Cash expense", Editor.Account to "Account",
             Editor.FixedDeposit to "Fixed deposit",
             Editor.Budget to "Monthly budget",
+            Editor.Trade to "Investment trade",
         ).forEach { (choice, label) -> TextButton(onClick = { editor = choice; addMenu = false }) { Text(label) } } } },
         confirmButton = { TextButton(onClick = { addMenu = false }) { Text("Close") } })
 
@@ -238,6 +242,14 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
         dismissButton = { TextButton(onClick = { selectedTransaction = null }) { Text("Close") } }) }
 
     editor?.let { current -> when (current) {
+        Editor.Trade -> TradeEditor(accounts.filter { it.type == "broker_cash" }, positions,
+            { editor = null }) { broker, symbol, name, side, quantity, price, fee, date -> scope.launch {
+            try {
+                repository.recordTrade(broker, symbol, name, side, quantity.toBigDecimal(), price.toBigDecimal(),
+                    Money.parse(fee.ifBlank { "0" }, "INR"), LocalDate.parse(date))
+                editor = null; snackbar.showSnackbar("Investment trade saved")
+            } catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save trade") }
+        } }
         Editor.Budget -> BudgetEditor(categories.filter { it.kind == "expense" && !it.isArchived },
             { editor = null }) { categoryId, amount -> scope.launch {
             try {
@@ -294,9 +306,10 @@ private fun HomeContent(
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item { Text("Your finances", style = MaterialTheme.typography.headlineMedium) }
         item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(20.dp)) {
-            Text("Net worth", style = MaterialTheme.typography.titleMedium)
+            Text("Recorded net worth", style = MaterialTheme.typography.titleMedium)
             Text(formatMoney(assets - liabilities, "INR"), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.SemiBold)
             Text("Assets ${formatMoney(assets, "INR")}   Liabilities ${formatMoney(liabilities, "INR")}")
+            Text("Investment holdings use recorded cost until a valuation is available.", style = MaterialTheme.typography.bodySmall)
         } } }
         item { DailySpendingCard(dailySpending, onDay) }
         item { CategorySpendingCard(categoryTotals, categoryNames, onCategory) }
@@ -470,11 +483,25 @@ private fun ImportContent(
 
 @Composable
 private fun WealthContent(balances: List<AccountBalance>, deposits: List<FixedDepositEntity>,
-    onAddDeposit: () -> Unit, modifier: Modifier) {
+    positions: List<PositionSummary>, onAddDeposit: () -> Unit, onTrade: () -> Unit, modifier: Modifier) {
     val depositAccountIds = deposits.mapTo(mutableSetOf()) { it.assetAccountId }
-    val assets = balances.filter { (it.type == "asset" || it.type == "broker_cash") && it.id !in depositAccountIds }
+    val investmentAccountIds = positions.mapTo(mutableSetOf()) { it.instrument.assetAccountId }
+    val assets = balances.filter { (it.type == "asset" || it.type == "broker_cash") && it.id !in depositAccountIds && it.id !in investmentAccountIds }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Wealth", style = MaterialTheme.typography.headlineMedium) }
+        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Investments", style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = onTrade) { Text("Add trade") }
+        } }
+        if (positions.isEmpty()) item { Text("No holdings yet. Add a broker cash account, then record a buy trade.") }
+        items(positions, key = { it.instrument.id }) { holding -> Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("${holding.instrument.symbol} · ${holding.instrument.name}", fontWeight = FontWeight.SemiBold)
+                Text("${holding.quantity.stripTrailingZeros().toPlainString()} units")
+                Text("Cost basis ${formatMoney(holding.costBasisMinor, holding.instrument.currencyCode)}")
+                Text("Market value is unavailable until a dated valuation is recorded.", style = MaterialTheme.typography.bodySmall)
+            }
+        } }
         item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Fixed deposits", style = MaterialTheme.typography.titleMedium)
             TextButton(onClick = onAddDeposit) { Text("Add") }
@@ -497,6 +524,45 @@ private fun WealthContent(balances: List<AccountBalance>, deposits: List<FixedDe
         items(assets) { account -> Card(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(18.dp),
             horizontalArrangement = Arrangement.SpaceBetween) { Text(account.name); Text(formatMoney(account.balanceMinor, account.currencyCode)) } } }
     }
+}
+
+@Composable
+private fun TradeEditor(brokers: List<AccountEntity>, positions: List<PositionSummary>,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String, String, String, String, String, String) -> Unit) {
+    var broker by remember { mutableStateOf(brokers.firstOrNull()?.id.orEmpty()) }
+    var side by remember { mutableStateOf("buy") }
+    var symbol by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    var quantity by remember { mutableStateOf("") }
+    var price by remember { mutableStateOf("") }
+    var fee by remember { mutableStateOf("0") }
+    var date by remember { mutableStateOf(LocalDate.now().toString()) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Investment trade") },
+        text = { LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (brokers.isEmpty()) item { Text("Add a broker cash account first.") }
+            items(brokers, key = { it.id }) { account -> FilterChip(broker == account.id,
+                onClick = { broker = account.id }, label = { Text(account.name) }) }
+            item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(side == "buy", onClick = { side = "buy" }, label = { Text("Buy") })
+                FilterChip(side == "sell", onClick = { side = "sell" }, label = { Text("Sell") })
+            } }
+            items(positions, key = { it.instrument.id }) { holding -> FilterChip(symbol == holding.instrument.symbol,
+                onClick = { symbol = holding.instrument.symbol; name = holding.instrument.name },
+                label = { Text("${holding.instrument.symbol} · ${holding.quantity.stripTrailingZeros().toPlainString()} held") }) }
+            item { OutlinedTextField(symbol, { symbol = it }, label = { Text("Symbol") }) }
+            item { OutlinedTextField(name, { name = it }, label = { Text("Instrument name") }) }
+            item { OutlinedTextField(quantity, { quantity = it }, label = { Text("Quantity") }) }
+            item { OutlinedTextField(price, { price = it }, label = { Text("Unit price in INR") }) }
+            item { OutlinedTextField(fee, { fee = it }, label = { Text("Fees in INR") }) }
+            item { OutlinedTextField(date, { date = it }, label = { Text("Trade date YYYY-MM-DD") }) }
+        } },
+        confirmButton = { Button(onClick = { onSave(broker, symbol, name, side, quantity, price, fee, date) },
+            enabled = broker.isNotBlank() && symbol.isNotBlank() && name.isNotBlank() && runCatching {
+                LocalDate.parse(date); quantity.toBigDecimal() > BigDecimal.ZERO && price.toBigDecimal() > BigDecimal.ZERO &&
+                    Money.parse(fee, "INR").minor >= 0
+            }.getOrDefault(false)) { Text("Save trade") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable
