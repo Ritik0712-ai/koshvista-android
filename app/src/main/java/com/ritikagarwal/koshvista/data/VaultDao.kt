@@ -63,6 +63,21 @@ interface VaultDao {
         ORDER BY t.localDate DESC, t.createdAtMs DESC
     """)
     fun transactionsForCategory(ownerId: String, categoryId: String?, from: String, through: String): Flow<List<TransactionEntity>>
+    @Query("""
+        SELECT DISTINCT t.* FROM transactions t
+        LEFT JOIN transaction_splits s ON s.ownerId = t.ownerId AND s.transactionId = t.id
+        WHERE t.ownerId = :ownerId AND t.status = 'posted'
+          AND (:accountId IS NULL OR t.accountId = :accountId)
+          AND (:day IS NULL OR t.localDate = :day)
+          AND (:categoryFilter = 0 OR (t.kind = 'expense' AND t.localDate BETWEEN :from AND :through
+            AND ((:categoryId IS NULL AND COALESCE(s.categoryId, t.categoryId) IS NULL)
+              OR COALESCE(s.categoryId, t.categoryId) = :categoryId)))
+          AND (:search IS NULL OR instr(lower(t.description), lower(:search)) > 0)
+        ORDER BY t.localDate DESC, t.createdAtMs DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    fun searchTransactions(ownerId: String, accountId: String?, day: String?, categoryFilter: Boolean,
+        categoryId: String?, from: String, through: String, search: String?, limit: Int, offset: Int): Flow<List<TransactionEntity>>
     @Query("SELECT * FROM transactions WHERE ownerId = :ownerId AND transferGroupId = :groupId")
     suspend fun transferEntries(ownerId: String, groupId: String): List<TransactionEntity>
     @Query("SELECT COUNT(*) FROM transactions WHERE ownerId = :ownerId AND accountId = :accountId AND sourceFingerprint = :fingerprint AND status = 'posted'")

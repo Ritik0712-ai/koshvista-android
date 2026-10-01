@@ -205,6 +205,12 @@ class VaultIntegrationTest {
                 assertEquals(2_000L, dao.dailySpending(owner, day.toString(), day.toString()).first().single().totalMinor)
                 assertEquals(3, dao.transactionsForDay(owner, day.toString()).first().size)
                 assertEquals(listOf(expense), dao.transactionsForCategory(owner, food, day.toString(), day.toString()).first().map { it.id })
+                assertEquals(listOf(expense), dao.searchTransactions(owner, bank, day.toString(), true,
+                    food, day.toString(), day.toString(), "Market", 50, 0).first().map { it.id })
+                assertEquals(1, dao.searchTransactions(owner, bank, null, false, null,
+                    day.toString(), day.toString(), null, 1, 1).first().size)
+                assertTrue(dao.searchTransactions(owner, null, null, false, null,
+                    day.toString(), day.toString(), "not present", 50, 0).first().isEmpty())
             } finally { database.close() }
         } finally { factory.delete(owner) }
     }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -102,15 +103,16 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var activityDay by remember { mutableStateOf<String?>(null) }
     var activityCategory by remember { mutableStateOf<String?>(null) }
     var categoryFilterActive by remember { mutableStateOf(false) }
+    var activityAccountId by remember { mutableStateOf<String?>(null) }
+    var activitySearch by remember { mutableStateOf("") }
+    var activityPage by remember { mutableStateOf(0) }
     var backupAction by remember { mutableStateOf<String?>(null) }
     var recoveryPassphrase by remember { mutableStateOf("") }
     var documentPreview by remember { mutableStateOf<String?>(null) }
-    val filteredActivity = remember(repository, activityDay, activityCategory, categoryFilterActive) {
-        when {
-            activityDay != null -> database.vaultDao().transactionsForDay(ownerId, activityDay!!)
-            categoryFilterActive -> database.vaultDao().transactionsForCategory(ownerId, activityCategory, monthStart, today)
-            else -> repository.recentTransactions
-        }
+    val filteredActivity = remember(repository, activityDay, activityCategory, categoryFilterActive,
+        activityAccountId, activitySearch, activityPage) {
+        database.vaultDao().searchTransactions(ownerId, activityAccountId, activityDay, categoryFilterActive,
+            activityCategory, monthStart, today, activitySearch.trim().ifBlank { null }, 50, activityPage * 50)
     }
     val visibleTransactions by filteredActivity.collectAsState(emptyList())
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -185,13 +187,16 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 onAccount = { selectedAccount = it }, onAccountAdd = { editor = Editor.Account },
                 onCashSpend = { editor = Editor.CashExpense },
                 onBudget = { editor = Editor.Budget },
-                onDay = { activityDay = it; categoryFilterActive = false; tab = Tab.Activity },
-                onCategory = { activityCategory = it; activityDay = null; categoryFilterActive = true; tab = Tab.Activity },
+                onDay = { activityDay = it; categoryFilterActive = false; activityPage = 0; tab = Tab.Activity },
+                onCategory = { activityCategory = it; activityDay = null; categoryFilterActive = true; activityPage = 0; tab = Tab.Activity },
                 Modifier.padding(padding))
             Tab.Activity -> ActivityContent(visibleTransactions, accounts, { editor = Editor.Expense },
                 onSelect = { selectedTransaction = it },
+                accountId = activityAccountId, onAccount = { activityAccountId = it; activityPage = 0 },
+                search = activitySearch, onSearch = { activitySearch = it; activityPage = 0 },
+                page = activityPage, onPage = { activityPage = it },
                 filterLabel = activityDay ?: if (categoryFilterActive) activityCategory?.let { id -> categories.find { it.id == id }?.name } ?: "Uncategorised" else null,
-                onClearFilter = { activityDay = null; activityCategory = null; categoryFilterActive = false },
+                onClearFilter = { activityDay = null; activityCategory = null; categoryFilterActive = false; activityPage = 0 },
                 Modifier.padding(padding))
             Tab.Import -> ImportContent(accounts, importJobs, importAccountId, selectedImportId, importRepository,
                 onAccount = { importAccountId = it }, onPick = { filePicker.launch(arrayOf("text/*", "application/csv")) },
@@ -390,9 +395,18 @@ private fun BudgetEditor(categories: List<com.ritikagarwal.koshvista.data.Catego
 @Composable
 private fun ActivityContent(transactions: List<TransactionEntity>, accounts: List<AccountEntity>, onAdd: () -> Unit,
     onSelect: (TransactionEntity) -> Unit,
+    accountId: String?, onAccount: (String?) -> Unit,
+    search: String, onSearch: (String) -> Unit, page: Int, onPage: (Int) -> Unit,
     filterLabel: String?, onClearFilter: () -> Unit, modifier: Modifier) {
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Text("Activity", style = MaterialTheme.typography.headlineMedium) }
+        item { OutlinedTextField(search, onSearch, label = { Text("Search descriptions") }, modifier = Modifier.fillMaxWidth()) }
+        item { LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { FilterChip(accountId == null, onClick = { onAccount(null) }, label = { Text("All accounts") }) }
+            items(accounts, key = { "filter-${it.id}" }) { account ->
+                FilterChip(accountId == account.id, onClick = { onAccount(account.id) }, label = { Text(account.name) })
+            }
+        } }
         if (filterLabel != null) item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Showing $filterLabel")
             TextButton(onClick = onClearFilter) { Text("Clear filter") }
@@ -410,6 +424,11 @@ private fun ActivityContent(transactions: List<TransactionEntity>, accounts: Lis
                 }
                 Text(formatMoney(transaction.amountMinor, transaction.currencyCode))
             }
+        } }
+        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(onClick = { onPage(page - 1) }, enabled = page > 0) { Text("Previous") }
+            Text("Page ${page + 1}")
+            TextButton(onClick = { onPage(page + 1) }, enabled = transactions.size == 50) { Text("Next") }
         } }
     }
 }
