@@ -37,6 +37,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
             PositionSummary(instrument, held.quantity, held.costBasisMinor)
         }.filter { it.quantity > BigDecimal.ZERO }
     }
+    fun observations(accountId: String): Flow<List<BalanceObservationEntity>> = dao.observations(ownerId, accountId)
 
     suspend fun initialiseOwner(displayName: String?) = database.withTransaction {
         if (dao.owner(ownerId) == null) {
@@ -86,6 +87,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         val account = dao.account(ownerId, accountId) ?: error("Account unavailable")
         require(account.status == "active")
         require(account.currencyCode == amount.currencyCode)
+        require(date.toString() >= account.openingLocalDate) { "Date precedes account opening" }
         require(description.isNotBlank())
         require(amount.minor != 0L)
         require(kind != EntryKind.TRANSFER) { "Use transfer() for paired entries" }
@@ -121,6 +123,9 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         val from = dao.account(ownerId, fromAccountId) ?: error("Source account unavailable")
         val to = dao.account(ownerId, toAccountId) ?: error("Destination account unavailable")
         require(from.status == "active" && to.status == "active")
+        require(date.toString() >= from.openingLocalDate && date.toString() >= to.openingLocalDate) {
+            "Transfer date precedes an account opening"
+        }
         require(from.currencyCode == amount.currencyCode && to.currencyCode == amount.currencyCode) { "Cross-currency transfer needs an explicit FX rate" }
         val (debit, credit) = LedgerMath.transfer(fromAccountId, toAccountId, amount, date)
         val group = UUID.randomUUID().toString()
@@ -162,6 +167,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         val source = dao.account(ownerId, sourceAccountId) ?: error("Funding account unavailable")
         require(source.status == "active" && source.type in setOf("bank", "cash", "broker_cash"))
         require(source.currencyCode == principal.currencyCode)
+        require(start.toString() >= source.openingLocalDate)
         val now = System.currentTimeMillis()
         val id = UUID.randomUUID().toString()
         val assetId = UUID.randomUUID().toString()
@@ -216,6 +222,7 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
         require(fees.minor >= 0)
         val broker = dao.account(ownerId, brokerAccountId) ?: error("Broker cash account unavailable")
         require(broker.status == "active" && broker.type == "broker_cash")
+        require(date.toString() >= broker.openingLocalDate)
         require(broker.currencyCode == fees.currencyCode)
         val normalizedSymbol = symbol.trim().uppercase()
         val gross = PositionMath.grossMinor(quantity, unitPrice, fees.currencyCode)
@@ -264,5 +271,37 @@ class LedgerRepository(private val ownerId: String, private val database: VaultD
             fees.minor, gross, costBasis, realisedGain, broker.currencyCode, now, now))
         check(dao.transferEntries(ownerId, group).sumOf { it.amountMinor } == 0L)
         tradeId
+    }
+
+    suspend fun observeBalance(accountId: String, day: LocalDate, observed: Money): String = database.withTransaction {
+        val account = dao.account(ownerId, accountId) ?: error("Account unavailable")
+        require(account.status == "active" && account.currencyCode == observed.currencyCode)
+        require(day.toString() >= account.openingLocalDate)
+        val computed = dao.accountBalanceThrough(ownerId, accountId, day.toString()) ?: error("Account unavailable")
+        val difference = Math.subtractExact(observed.minor, computed)
+        val now = System.currentTimeMillis()
+        val id = UUID.randomUUID().toString()
+        dao.insertObservation(BalanceObservationEntity(ownerId, id, accountId, day.toString(), observed.minor,
+            computed, difference, observed.currencyCode, if (difference == 0L) "matched" else "unresolved",
+            createdAtMs = now, updatedAtMs = now))
+        id
+    }
+
+    suspend fun postReconciliationAdjustment(observationId: String): String = database.withTransaction {
+        val observation = dao.observation(ownerId, observationId) ?: error("Observation unavailable")
+        require(observation.status == "unresolved" && observation.differenceMinor != 0L)
+        val account = dao.account(ownerId, observation.accountId) ?: error("Account unavailable")
+        require(account.status == "active")
+        require(dao.accountBalanceThrough(ownerId, account.id, observation.observedLocalDate) == observation.computedBalanceMinor) {
+            "Ledger changed since comparison; compare the balance again"
+        }
+        val now = System.currentTimeMillis()
+        val transactionId = UUID.randomUUID().toString()
+        dao.insertTransaction(TransactionEntity(ownerId, transactionId, account.id, observation.observedLocalDate,
+            "Balance reconciliation", null, observation.differenceMinor, account.currencyCode, "adjustment",
+            note = "User-approved adjustment for observation ${observation.id}", createdAtMs = now, updatedAtMs = now))
+        dao.updateObservation(observation.copy(status = "adjusted", resolvedTransactionId = transactionId, updatedAtMs = now))
+        check(dao.accountBalanceThrough(ownerId, account.id, observation.observedLocalDate) == observation.observedBalanceMinor)
+        transactionId
     }
 }

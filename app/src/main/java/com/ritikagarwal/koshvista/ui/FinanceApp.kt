@@ -445,9 +445,14 @@ private fun AccountDetail(account: AccountEntity, balance: AccountBalance, owner
     val entries by remember(database, account.id) {
         database.vaultDao().accountTransactions(ownerId, account.id, 100)
     }.collectAsState(emptyList())
+    val observations by remember(repository, account.id) { repository.observations(account.id) }.collectAsState(emptyList())
     var renaming by remember(account.id) { mutableStateOf(false) }
     var confirmingArchive by remember(account.id) { mutableStateOf(false) }
     var newName by remember(account.id) { mutableStateOf(account.name) }
+    var comparing by remember(account.id) { mutableStateOf(false) }
+    var observationToAdjust by remember(account.id) { mutableStateOf<String?>(null) }
+    var comparisonDate by remember(account.id) { mutableStateOf(LocalDate.now().toString()) }
+    var observedAmount by remember(account.id) { mutableStateOf("") }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = onBack) { Text("Back to Home") } }
         item { Text(account.name, style = MaterialTheme.typography.headlineMedium) }
@@ -457,6 +462,20 @@ private fun AccountDetail(account: AccountEntity, balance: AccountBalance, owner
         item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { newName = account.name; renaming = true }) { Text("Rename") }
             TextButton(onClick = { confirmingArchive = true }) { Text("Archive") }
+            TextButton(onClick = { comparing = true }) { Text("Compare balance") }
+        } }
+        item { Text("Balance comparisons", style = MaterialTheme.typography.titleLarge) }
+        if (observations.isEmpty()) item { Text("No statement balance compared yet.") }
+        items(observations, key = { it.id }) { observation -> Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("${observation.observedLocalDate} · ${observation.status}")
+                Text("Statement ${formatMoney(observation.observedBalanceMinor, observation.currencyCode)}")
+                Text("Ledger at comparison ${formatMoney(observation.computedBalanceMinor, observation.currencyCode)}")
+                if (observation.differenceMinor != 0L) Text("Difference ${formatMoney(observation.differenceMinor, observation.currencyCode)}")
+                if (observation.status == "unresolved") TextButton(onClick = { observationToAdjust = observation.id }) {
+                    Text("Review adjustment")
+                }
+            }
         } }
         item { Text("Recent entries", style = MaterialTheme.typography.titleLarge) }
         if (entries.isEmpty()) item { Text("No posted entries for this account.") }
@@ -481,6 +500,31 @@ private fun AccountDetail(account: AccountEntity, balance: AccountBalance, owner
             catch (error: Exception) { onMessage(error.message ?: "Could not archive account") }
         } }) { Text("Archive") } },
         dismissButton = { TextButton(onClick = { confirmingArchive = false }) { Text("Cancel") } })
+    if (comparing) AlertDialog(onDismissRequest = { comparing = false }, title = { Text("Compare statement balance") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("This records a comparison; it will not change your ledger.")
+            OutlinedTextField(comparisonDate, { comparisonDate = it }, label = { Text("Statement date YYYY-MM-DD") })
+            OutlinedTextField(observedAmount, { observedAmount = it }, label = { Text("Statement balance in INR") })
+        } },
+        confirmButton = { Button(onClick = { scope.launch {
+            try {
+                repository.observeBalance(account.id, LocalDate.parse(comparisonDate), Money.parse(observedAmount, "INR"))
+                comparing = false; onMessage("Balance comparison saved")
+            } catch (error: Exception) { onMessage(error.message ?: "Could not compare balance") }
+        } }, enabled = runCatching { LocalDate.parse(comparisonDate); Money.parse(observedAmount, "INR") }.isSuccess) {
+            Text("Compare")
+        } }, dismissButton = { TextButton(onClick = { comparing = false }) { Text("Cancel") } })
+    observationToAdjust?.let { id ->
+        val observation = observations.find { it.id == id }
+        if (observation != null) AlertDialog(onDismissRequest = { observationToAdjust = null },
+            title = { Text("Post balance adjustment?") },
+            text = { Text("A ${formatMoney(observation.differenceMinor, observation.currencyCode)} adjustment will be added on ${observation.observedLocalDate}. Check the statement and missing transactions first.") },
+            confirmButton = { Button(onClick = { scope.launch {
+                try { repository.postReconciliationAdjustment(id); observationToAdjust = null; onMessage("Adjustment posted") }
+                catch (error: Exception) { onMessage(error.message ?: "Could not post adjustment") }
+            } }) { Text("Post adjustment") } },
+            dismissButton = { TextButton(onClick = { observationToAdjust = null }) { Text("Cancel") } })
+    }
 }
 
 @Composable

@@ -16,7 +16,7 @@ class LocalVaultBackup(private val context: Context) {
     private val files = DocumentStore(context)
     private val tables = listOf("owners", "accounts", "categories", "source_documents", "transactions",
         "transaction_splits", "import_jobs", "import_candidates", "fixed_deposits", "budgets",
-        "instruments", "investment_trades")
+        "instruments", "investment_trades", "balance_observations")
     private val maxArchiveBytes = 100 * 1024 * 1024
 
     suspend fun create(ownerId: String, database: VaultDatabase, passphrase: CharArray): ByteArray {
@@ -24,7 +24,7 @@ class LocalVaultBackup(private val context: Context) {
             JSONObject().apply {
                 put("format", 1)
                 put("owner", ownerId)
-                put("schema", 5)
+                put("schema", 6)
                 val data = JSONObject()
                 tables.forEach { table -> data.put(table, rows(database, table, ownerId)) }
                 put("tables", data)
@@ -51,7 +51,7 @@ class LocalVaultBackup(private val context: Context) {
         require(plaintext.size <= maxArchiveBytes) { "Backup payload is too large" }
         val snapshot = JSONObject(String(plaintext, Charsets.UTF_8))
         plaintext.fill(0)
-        require(snapshot.getInt("format") == 1 && snapshot.getInt("schema") in 4..5)
+        require(snapshot.getInt("format") == 1 && snapshot.getInt("schema") in 4..6)
         require(snapshot.getString("owner") == ownerId) { "Backup belongs to a different owner" }
         val data = snapshot.getJSONObject("tables")
         val documentBytes = snapshot.getJSONObject("documents")

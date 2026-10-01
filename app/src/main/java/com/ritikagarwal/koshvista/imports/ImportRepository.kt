@@ -118,6 +118,7 @@ class ImportRepository(
         rows.filter { it.decision == "accepted" }.forEach { row ->
             val amount = requireNotNull(row.amountMinor)
             require(amount != 0L && row.currencyCode == account.currencyCode)
+            require(requireNotNull(row.localDate) >= account.openingLocalDate) { "Statement date precedes account opening" }
             val id = UUID.randomUUID().toString()
             ledgerDao.insertTransaction(TransactionEntity(ownerId, id, job.accountId, requireNotNull(row.localDate),
                 row.description, null, amount, row.currencyCode, if (amount < 0) "expense" else "income",

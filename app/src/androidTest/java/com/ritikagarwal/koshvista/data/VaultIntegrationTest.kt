@@ -19,6 +19,32 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun reconciliationRequiresExplicitAdjustmentAndRejectsStaleComparison() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val repo = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 10, 1)
+                repo.initialiseOwner("Tester")
+                val bank = repo.addAccount("bank", "Bank", "INR", Money(10_000, "INR"), day)
+                val stale = repo.observeBalance(bank, day, Money(12_000, "INR"))
+                assertEquals(10_000L, repo.balances.first().single().balanceMinor)
+                repo.addTransaction(bank, EntryKind.INCOME, Money(500, "INR"), day, "Late entry")
+                assertTrue(runCatching { repo.postReconciliationAdjustment(stale) }.isFailure)
+                val current = repo.observeBalance(bank, day, Money(12_000, "INR"))
+                val observation = repo.observations(bank).first().first { it.id == current }
+                assertEquals(1_500L, observation.differenceMinor)
+                repo.postReconciliationAdjustment(current)
+                assertEquals(12_000L, repo.balances.first().single().balanceMinor)
+                assertEquals("adjusted", repo.observations(bank).first().first { it.id == current }.status)
+                assertTrue(runCatching { repo.postReconciliationAdjustment(current) }.isFailure)
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun accountArchiveRequiresZeroBalanceAndPreservesLedger() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)
@@ -286,7 +312,7 @@ class VaultIntegrationTest {
             try {
                 val ledger = LedgerRepository(owner, database)
                 ledger.initialiseOwner("Tester")
-                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.now())
+                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.of(2026, 1, 1))
                 val importer = ImportRepository(owner, database, context)
                 val csv = "Date,Description,Debit,Credit\n2026-09-30,Cafe,12.50,\n03/04/2026,Salary,,300.00\n".toByteArray()
                 val jobId = importer.stageCsv(bank, "sample.csv", csv)
@@ -318,7 +344,7 @@ class VaultIntegrationTest {
             try {
                 val ledger = LedgerRepository(owner, database)
                 ledger.initialiseOwner("Tester")
-                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.now())
+                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.of(2026, 1, 1))
                 val importer = ImportRepository(owner, database, context)
                 val job = importer.stageCsv(bank, "uncertain.csv",
                     "Date,Description,Amount,Type\n03/04/2026,Cafe,12.50,unknown\n".toByteArray())

@@ -42,6 +42,8 @@ interface VaultDao {
     fun balances(ownerId: String): Flow<List<AccountBalance>>
     @Query("SELECT openingBalanceMinor + COALESCE((SELECT SUM(amountMinor) FROM transactions WHERE ownerId = :ownerId AND accountId = :accountId AND status = 'posted'), 0) FROM accounts WHERE ownerId = :ownerId AND id = :accountId")
     suspend fun accountBalanceOnce(ownerId: String, accountId: String): Long?
+    @Query("SELECT openingBalanceMinor + COALESCE((SELECT SUM(amountMinor) FROM transactions WHERE ownerId = :ownerId AND accountId = :accountId AND status = 'posted' AND localDate <= :day), 0) FROM accounts WHERE ownerId = :ownerId AND id = :accountId")
+    suspend fun accountBalanceThrough(ownerId: String, accountId: String, day: String): Long?
 
     @Insert suspend fun insertCategory(category: CategoryEntity)
     @Query("SELECT * FROM categories WHERE ownerId = :ownerId AND isArchived = 0 ORDER BY name")
@@ -141,4 +143,11 @@ interface VaultDao {
     suspend fun instrumentTrades(ownerId: String, instrumentId: String): List<InvestmentTradeEntity>
     @Query("SELECT COUNT(*) FROM instruments WHERE ownerId = :ownerId AND assetAccountId = :accountId")
     suspend fun instrumentCountForAccount(ownerId: String, accountId: String): Int
+
+    @Insert suspend fun insertObservation(observation: BalanceObservationEntity)
+    @Update suspend fun updateObservation(observation: BalanceObservationEntity)
+    @Query("SELECT * FROM balance_observations WHERE ownerId = :ownerId AND id = :id")
+    suspend fun observation(ownerId: String, id: String): BalanceObservationEntity?
+    @Query("SELECT * FROM balance_observations WHERE ownerId = :ownerId AND accountId = :accountId ORDER BY observedLocalDate DESC, createdAtMs DESC")
+    fun observations(ownerId: String, accountId: String): Flow<List<BalanceObservationEntity>>
 }
