@@ -68,13 +68,15 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     val importRepository = remember(ownerId, database) { ImportRepository(ownerId, database, context) }
     val accounts by repository.accounts.collectAsState(emptyList())
     val balances by repository.balances.collectAsState(emptyList())
-    val transactions by repository.recentTransactions.collectAsState(emptyList())
     val categories by repository.categories.collectAsState(emptyList())
     val importJobs by importRepository.history.collectAsState(emptyList())
     val monthStart = remember { LocalDate.now().withDayOfMonth(1).toString() }
     val today = remember { LocalDate.now().toString() }
+    val lastSevenStart = remember { LocalDate.now().minusDays(6).toString() }
     val income by remember(repository) { database.vaultDao().totalForKind(ownerId, "income", monthStart, today) }.collectAsState(0L)
     val expense by remember(repository) { database.vaultDao().totalForKind(ownerId, "expense", monthStart, today) }.collectAsState(0L)
+    val categoryTotals by remember(repository) { database.vaultDao().categorySpending(ownerId, monthStart, today) }.collectAsState(emptyList())
+    val dailySpending by remember(repository) { database.vaultDao().dailySpending(ownerId, lastSevenStart, today) }.collectAsState(emptyList())
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var tab by remember { mutableStateOf(Tab.Home) }
@@ -83,6 +85,17 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
     var selectedAccount by remember { mutableStateOf<AccountBalance?>(null) }
     var importAccountId by remember { mutableStateOf("") }
     var selectedImportId by remember { mutableStateOf<String?>(null) }
+    var activityDay by remember { mutableStateOf<String?>(null) }
+    var activityCategory by remember { mutableStateOf<String?>(null) }
+    var categoryFilterActive by remember { mutableStateOf(false) }
+    val filteredActivity = remember(repository, activityDay, activityCategory, categoryFilterActive) {
+        when {
+            activityDay != null -> database.vaultDao().transactionsForDay(ownerId, activityDay!!)
+            categoryFilterActive -> database.vaultDao().transactionsForCategory(ownerId, activityCategory, monthStart, today)
+            else -> repository.recentTransactions
+        }
+    }
+    val visibleTransactions by filteredActivity.collectAsState(emptyList())
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
             try {
@@ -111,10 +124,17 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
             FloatingActionButton(onClick = { addMenu = true }) { Text("Add") } },
     ) { padding ->
         when (tab) {
-            Tab.Home -> HomeContent(balances, income, expense,
+            Tab.Home -> HomeContent(balances, income, expense, dailySpending, categoryTotals,
+                categories.associate { it.id to it.name },
                 onAccount = { selectedAccount = it }, onAccountAdd = { editor = Editor.Account },
-                onCashSpend = { editor = Editor.CashExpense }, Modifier.padding(padding))
-            Tab.Activity -> ActivityContent(transactions, accounts, { editor = Editor.Expense }, Modifier.padding(padding))
+                onCashSpend = { editor = Editor.CashExpense },
+                onDay = { activityDay = it; categoryFilterActive = false; tab = Tab.Activity },
+                onCategory = { activityCategory = it; activityDay = null; categoryFilterActive = true; tab = Tab.Activity },
+                Modifier.padding(padding))
+            Tab.Activity -> ActivityContent(visibleTransactions, accounts, { editor = Editor.Expense },
+                filterLabel = activityDay ?: if (categoryFilterActive) activityCategory?.let { id -> categories.find { it.id == id }?.name } ?: "Uncategorised" else null,
+                onClearFilter = { activityDay = null; activityCategory = null; categoryFilterActive = false },
+                Modifier.padding(padding))
             Tab.Import -> ImportContent(accounts, importJobs, importAccountId, selectedImportId, importRepository,
                 onAccount = { importAccountId = it }, onPick = { filePicker.launch(arrayOf("text/*", "application/csv")) },
                 onSelectJob = { selectedImportId = it }, onCommit = { id -> scope.launch {
@@ -173,7 +193,10 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
 @Composable
 private fun HomeContent(
     balances: List<AccountBalance>, income: Long, expense: Long,
+    dailySpending: List<com.ritikagarwal.koshvista.data.DailySpend>,
+    categoryTotals: List<com.ritikagarwal.koshvista.data.CategoryTotal>, categoryNames: Map<String, String>,
     onAccount: (AccountBalance) -> Unit, onAccountAdd: () -> Unit, onCashSpend: () -> Unit,
+    onDay: (String) -> Unit, onCategory: (String?) -> Unit,
     modifier: Modifier,
 ) {
     val assets = balances.filter { it.type !in setOf("liability", "credit_card") }.sumOf { it.balanceMinor }
@@ -185,6 +208,8 @@ private fun HomeContent(
             Text(formatMoney(assets - liabilities, "INR"), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.SemiBold)
             Text("Assets ${formatMoney(assets, "INR")}   Liabilities ${formatMoney(liabilities, "INR")}")
         } } }
+        item { DailySpendingCard(dailySpending, onDay) }
+        item { CategorySpendingCard(categoryTotals, categoryNames, onCategory) }
         item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(20.dp)) {
             Text("This month's cash flow", style = MaterialTheme.typography.titleMedium)
             Text("Income ${formatMoney(income, "INR")}")
@@ -207,9 +232,14 @@ private fun HomeContent(
 }
 
 @Composable
-private fun ActivityContent(transactions: List<TransactionEntity>, accounts: List<AccountEntity>, onAdd: () -> Unit, modifier: Modifier) {
+private fun ActivityContent(transactions: List<TransactionEntity>, accounts: List<AccountEntity>, onAdd: () -> Unit,
+    filterLabel: String?, onClearFilter: () -> Unit, modifier: Modifier) {
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Text("Activity", style = MaterialTheme.typography.headlineMedium) }
+        if (filterLabel != null) item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Showing $filterLabel")
+            TextButton(onClick = onClearFilter) { Text("Clear filter") }
+        } }
         if (transactions.isEmpty()) item { Column {
             Text("No transactions yet. Add an expense or income to begin your ledger.")
             Button(onClick = onAdd) { Text("Add expense") }
@@ -363,7 +393,7 @@ private fun TransferEditor(accounts: List<AccountEntity>, onDismiss: () -> Unit,
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-private fun formatMoney(minor: Long, currencyCode: String): String {
+internal fun formatMoney(minor: Long, currencyCode: String): String {
     val currency = Currency.getInstance(currencyCode)
     val amount = BigDecimal.valueOf(minor).movePointLeft(currency.defaultFractionDigits)
     return NumberFormat.getCurrencyInstance(Locale.forLanguageTag("en-IN")).apply { this.currency = currency }.format(amount)

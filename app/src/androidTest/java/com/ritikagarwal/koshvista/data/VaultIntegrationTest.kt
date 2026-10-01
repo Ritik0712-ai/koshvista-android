@@ -3,6 +3,7 @@ package com.ritikagarwal.koshvista.data
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ritikagarwal.koshvista.core.Money
+import com.ritikagarwal.koshvista.core.EntryKind
 import com.ritikagarwal.koshvista.imports.ImportRepository
 import com.ritikagarwal.koshvista.security.DocumentStore
 import java.time.LocalDate
@@ -16,6 +17,37 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VaultIntegrationTest {
+    @Test fun spendingChartsReconcileWithSplitExpensesAndIgnoreTransfers() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        try {
+            val database = factory.open(owner)
+            try {
+                val ledger = LedgerRepository(owner, database)
+                val day = LocalDate.of(2026, 9, 30)
+                ledger.initialiseOwner("Tester")
+                val bank = ledger.addAccount("bank", "Bank", "INR", Money(10_000, "INR"), day)
+                val cash = ledger.addAccount("cash", "Cash", "INR", Money(0, "INR"), day)
+                val categories = ledger.categories.first().filter { it.kind == "expense" }
+                val food = categories.first { it.name == "Food" }.id
+                val shopping = categories.first { it.name == "Shopping" }.id
+                val expense = ledger.addTransaction(bank, EntryKind.EXPENSE, Money(-2_000, "INR"), day, "Market")
+                ledger.split(expense, listOf(food to Money(-1_200, "INR"), shopping to Money(-800, "INR")))
+                ledger.transfer(bank, cash, Money(1_000, "INR"), day)
+
+                val dao = database.vaultDao()
+                val totals = dao.categorySpending(owner, day.toString(), day.toString()).first()
+                assertEquals(2_000L, totals.sumOf { it.totalMinor })
+                assertEquals(1_200L, totals.single { it.categoryId == food }.totalMinor)
+                assertEquals(800L, totals.single { it.categoryId == shopping }.totalMinor)
+                assertEquals(2_000L, dao.dailySpending(owner, day.toString(), day.toString()).first().single().totalMinor)
+                assertEquals(3, dao.transactionsForDay(owner, day.toString()).first().size)
+                assertEquals(listOf(expense), dao.transactionsForCategory(owner, food, day.toString(), day.toString()).first().map { it.id })
+            } finally { database.close() }
+        } finally { factory.delete(owner) }
+    }
+
     @Test fun encryptedVaultKeepsOwnersSeparateAndTransferBalanced() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val factory = VaultFactory(context)
