@@ -214,6 +214,9 @@ fun FinanceApp(ownerId: String, database: VaultDatabase, onSignOut: () -> Unit) 
                 onSelectJob = { selectedImportId = it }, onCommit = { id -> scope.launch {
                     try { val count = importRepository.commit(id); snackbar.showSnackbar("Saved $count transactions on this phone") }
                     catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not save import") }
+                } }, onUndo = { id -> scope.launch {
+                    try { val count = importRepository.undo(id); snackbar.showSnackbar("Reversed $count imported transactions") }
+                    catch (error: Exception) { snackbar.showSnackbar(error.message ?: "Could not undo import") }
                 } }, modifier = Modifier.padding(padding))
             Tab.Wealth -> WealthContent(balances, fixedDeposits, positions,
                 { editor = Editor.FixedDeposit }, { editor = Editor.Trade }, Modifier.padding(padding))
@@ -534,11 +537,12 @@ private fun ImportContent(
     onAccount: (String) -> Unit, onPick: () -> Unit,
     onReadDocument: () -> Unit, documentPreview: String?, onClearPreview: () -> Unit,
     onSelectJob: (String?) -> Unit,
-    onCommit: (String) -> Unit, modifier: Modifier,
+    onCommit: (String) -> Unit, onUndo: (String) -> Unit, modifier: Modifier,
 ) {
     val scope = rememberCoroutineScope()
     var message by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<ImportCandidateEntity?>(null) }
+    var confirmingUndo by remember { mutableStateOf(false) }
     val selectedJob = jobs.find { it.id == selectedJobId }
     val candidateFlow = remember(repository, selectedJobId) { selectedJobId?.let(repository::candidates) }
     val candidates by candidateFlow?.collectAsState(emptyList()) ?: remember { mutableStateOf(emptyList()) }
@@ -570,7 +574,11 @@ private fun ImportContent(
         } else {
             item { Text("Review statement", style = MaterialTheme.typography.titleLarge) }
             item { Text("${candidates.count { it.decision == "accepted" }} ready · ${candidates.count { it.decision == "unreviewed" }} need a decision · ${candidates.count { it.decision == "duplicate" }} duplicates") }
-            if (selectedJob.status == "completed") item { Text("Saved ${selectedJob.acceptedCount} transactions on this phone.") }
+            if (selectedJob.status == "completed") item { Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Saved ${selectedJob.acceptedCount} transactions on this phone.")
+                TextButton(onClick = { confirmingUndo = true }) { Text("Undo this import") }
+            } }
+            if (selectedJob.status == "undone") item { Text("This import was reversed. Its source and review history remain available.") }
             items(candidates, key = { it.id }) { candidate -> Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(candidate.description.ifBlank { "Row ${candidate.sourceRow}" }, fontWeight = FontWeight.SemiBold)
@@ -620,6 +628,11 @@ private fun ImportContent(
             } }) { Text("Save changes") } },
             dismissButton = { TextButton(onClick = { editing = null }) { Text("Cancel") } })
     }
+    if (confirmingUndo && selectedJob != null) AlertDialog(onDismissRequest = { confirmingUndo = false },
+        title = { Text("Undo statement import?") },
+        text = { Text("${selectedJob.acceptedCount} posted transactions will be reversed. The statement and review decisions remain in your vault.") },
+        confirmButton = { Button(onClick = { confirmingUndo = false; onUndo(selectedJob.id) }) { Text("Undo import") } },
+        dismissButton = { TextButton(onClick = { confirmingUndo = false }) { Text("Cancel") } })
 }
 
 @Composable

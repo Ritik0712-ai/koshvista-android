@@ -52,11 +52,13 @@ class ImportRepository(
                 dao.insertDocument(SourceDocumentEntity(ownerId, docId, displayName.take(200), "text/csv", hash,
                     fileRef, "bank_statement", bytes.size.toLong(), now, now))
                 dao.insertJob(ImportJobEntity(ownerId, jobId, docId, accountId, "review", 0, 0, now, now))
+                val seenFingerprints = mutableSetOf<String>()
                 parsed.forEach { row ->
                     val fingerprint = if (row.date != null && row.amount != null && row.description.isNotBlank())
                         sha256("$accountId|${row.date}|${row.amount.minor}|${row.description.trim().lowercase()}".toByteArray())
                     else null
-                    val possibleDuplicate = fingerprint != null && ledgerDao.fingerprintCount(ownerId, accountId, fingerprint) > 0
+                    val possibleDuplicate = fingerprint != null && (
+                        ledgerDao.fingerprintCount(ownerId, accountId, fingerprint) > 0 || !seenFingerprints.add(fingerprint))
                     val reasons = row.reviewReasons + if (possibleDuplicate) listOf("Possible duplicate") else emptyList()
                     val decision = when {
                         possibleDuplicate -> "duplicate"
@@ -130,6 +132,24 @@ class ImportRepository(
         dao.updateJob(job.copy(status = "completed", acceptedCount = count,
             duplicateCount = rows.count { it.decision == "duplicate" }, updatedAtMs = now))
         count
+    }
+
+    suspend fun undo(jobId: String): Int = database.withTransaction {
+        val job = dao.job(ownerId, jobId) ?: error("Import unavailable")
+        require(job.status == "completed") { "Only a completed import can be undone" }
+        val rows = dao.candidatesOnce(ownerId, jobId).filter { it.linkedTransactionId != null }
+        require(rows.size == job.acceptedCount)
+        val now = System.currentTimeMillis()
+        rows.forEach { row ->
+            val transaction = ledgerDao.transaction(ownerId, requireNotNull(row.linkedTransactionId))
+                ?: error("Imported transaction unavailable")
+            require(transaction.status == "posted" && transaction.sourceDocumentId == job.documentId) {
+                "An imported transaction changed; review it before undoing the import"
+            }
+            ledgerDao.updateTransaction(transaction.copy(status = "void", updatedAtMs = now))
+        }
+        dao.updateJob(job.copy(status = "undone", updatedAtMs = now))
+        rows.size
     }
 
     private fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)

@@ -327,6 +327,35 @@ class VaultIntegrationTest {
                 assertEquals(2, importer.commit(jobId))
                 sourceRef = database.importDao().document(owner, database.importDao().job(owner, jobId)!!.documentId)!!.encryptedFileRef
                 assertEquals(String(csv), String(DocumentStore(context).read(owner, sourceRef!!)))
+                assertEquals(2, importer.undo(jobId))
+                assertTrue(ledger.recentTransactions.first().isEmpty())
+                assertTrue(runCatching { importer.undo(jobId) }.isFailure)
+            } finally { database.close() }
+        } finally {
+            sourceRef?.let { DocumentStore(context).delete(owner, it) }
+            factory.delete(owner)
+        }
+    }
+
+    @Test fun repeatedCsvRowsRequireIndividualDuplicateReview() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val factory = VaultFactory(context)
+        val owner = "test-${UUID.randomUUID()}"
+        var sourceRef: String? = null
+        try {
+            val database = factory.open(owner)
+            try {
+                val ledger = LedgerRepository(owner, database)
+                ledger.initialiseOwner("Tester")
+                val bank = ledger.addAccount("bank", "Bank", "INR", Money(0, "INR"), LocalDate.of(2026, 1, 1))
+                val importer = ImportRepository(owner, database, context)
+                val job = importer.stageCsv(bank, "repeated.csv",
+                    "Date,Description,Debit,Credit\n2026-10-01,Cafe,12.50,\n2026-10-01,Cafe,12.50,\n".toByteArray())
+                val rows = importer.candidates(job).first()
+                assertEquals(listOf("accepted", "duplicate"), rows.map { it.decision })
+                assertEquals(1, importer.commit(job))
+                assertEquals(1, ledger.recentTransactions.first().size)
+                sourceRef = database.importDao().document(owner, database.importDao().job(owner, job)!!.documentId)!!.encryptedFileRef
             } finally { database.close() }
         } finally {
             sourceRef?.let { DocumentStore(context).delete(owner, it) }
